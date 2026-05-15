@@ -1,0 +1,80 @@
+# clang-format is the de-facto formatter for C/C++/Objective-C; it is to C
+# roughly what Prettier is to JavaScript. Run with: clang-format -i <files>.
+#
+# Style chosen to match the prevailing layout in src/main.c, src/ui/*, and
+# src/render/* (2-space indent, Allman braces, right-aligned pointers).
+# Running the formatter across the whole tree will also normalize the older
+# audio/analyzer files that currently use 4-space K&R.
+
+Language: Cpp
+Standard: c++11
+
+BasedOnStyle: LLVM
+IndentWidth: 2
+ContinuationIndentWidth: 4
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 100
+
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+
+IndentCaseLabels: false
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments: true
+
+PointerAlignment: Right
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+# Preserve the existing grouping (system / third-party / local) rather than
+# letting clang-format reshuffle includes.
+IncludeBlocks: Preserve
+SortIncludes: false
+
+# Objective-C (.m / .mm) files need their own language section; clang-format
+# refuses to apply the Cpp section to them. Keep the rules in sync with the
+# C section above.
+---
+Language: ObjC
+BasedOnStyle: LLVM
+IndentWidth: 2
+ContinuationIndentWidth: 4
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 100
+
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+
+IndentCaseLabels: false
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+
+PointerAlignment: Right
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+IncludeBlocks: Preserve
+SortIncludes: false
+
+ObjCSpaceAfterProperty: true
+ObjCSpaceBeforeProtocolList: true

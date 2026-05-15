@@ -1,0 +1,314 @@
+/*
+ * audio-visualizer - A real-time audio visualizer.
+ * Copyright (C) 2026  Charles Thompson
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+// stb_truetype-backed text renderer. The font is loaded once from a
+// list of candidate system paths; per requested pixel size a glyph
+// atlas (ASCII 32..126) is baked into an SDL streaming texture and
+// cached (LRU, bounded). ui_text_draw tints the atlas via
+// SDL_SetTextureColorMod from the renderer's current draw color.
+
+#include "text.h"
+
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <SDL3/SDL.h>
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#include "stb_truetype.h"
+
+#define ATLAS_W 512
+#define ATLAS_H 512
+#define GLYPH_FIRST 32
+#define GLYPH_COUNT 95 // 32..126 inclusive
+#define MAX_ATLASES 6
+
+typedef struct Atlas
+{
+  int size_px;
+  SDL_Texture *texture;
+  stbtt_bakedchar chars[GLYPH_COUNT];
+  uint64_t last_used;
+} Atlas;
+
+static unsigned char *g_font_data = NULL;
+static stbtt_fontinfo g_font_info;
+static bool g_font_loaded = false;
+static Atlas g_atlases[MAX_ATLASES];
+static int g_atlas_count = 0;
+static uint64_t g_use_counter = 0;
+
+static const char *FONT_CANDIDATES[] = {
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "/System/Library/Fonts/Supplemental/Andale Mono.ttf",
+    "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    NULL,
+};
+
+static unsigned char *read_file(const char *path, long *out_size)
+{
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return NULL;
+  if (fseek(f, 0, SEEK_END) != 0)
+  {
+    fclose(f);
+    return NULL;
+  }
+  long size = ftell(f);
+  if (size <= 0)
+  {
+    fclose(f);
+    return NULL;
+  }
+  rewind(f);
+  unsigned char *buf = (unsigned char *)malloc((size_t)size);
+  if (!buf)
+  {
+    fclose(f);
+    return NULL;
+  }
+  if (fread(buf, 1, (size_t)size, f) != (size_t)size)
+  {
+    free(buf);
+    fclose(f);
+    return NULL;
+  }
+  fclose(f);
+  *out_size = size;
+  return buf;
+}
+
+static bool load_font(void)
+{
+  for (const char **pp = FONT_CANDIDATES; *pp; ++pp)
+  {
+    long size = 0;
+    unsigned char *data = read_file(*pp, &size);
+    if (!data)
+      continue;
+    int offset = stbtt_GetFontOffsetForIndex(data, 0);
+    if (offset < 0 || !stbtt_InitFont(&g_font_info, data, offset))
+    {
+      free(data);
+      continue;
+    }
+    g_font_data = data;
+    g_font_loaded = true;
+    return true;
+  }
+  return false;
+}
+
+bool ui_text_init(struct SDL_Renderer *ren)
+{
+  (void)ren;
+  if (g_font_loaded)
+    return true;
+  memset(g_atlases, 0, sizeof(g_atlases));
+  g_atlas_count = 0;
+  g_use_counter = 0;
+  return load_font();
+}
+
+void ui_text_shutdown(void)
+{
+  for (int i = 0; i < g_atlas_count; ++i)
+  {
+    if (g_atlases[i].texture)
+      SDL_DestroyTexture(g_atlases[i].texture);
+  }
+  memset(g_atlases, 0, sizeof(g_atlases));
+  g_atlas_count = 0;
+  free(g_font_data);
+  g_font_data = NULL;
+  g_font_loaded = false;
+}
+
+// ---------------------------------------------------------------------------
+// Per-size atlas bake + LRU cache.
+// ---------------------------------------------------------------------------
+
+static SDL_Texture *bake_atlas_texture(SDL_Renderer *ren, int size_px, stbtt_bakedchar *chars_out)
+{
+  unsigned char *bitmap = (unsigned char *)calloc(ATLAS_W * ATLAS_H, 1);
+  if (!bitmap)
+    return NULL;
+  const int rc = stbtt_BakeFontBitmap(g_font_data, 0, (float)size_px, bitmap, ATLAS_W, ATLAS_H,
+                                      GLYPH_FIRST, GLYPH_COUNT, chars_out);
+  if (rc == 0)
+  {
+    free(bitmap);
+    return NULL;
+  }
+  // Expand single-channel alpha to RGBA (white tint preserved, alpha = src).
+  uint32_t *rgba = (uint32_t *)malloc((size_t)ATLAS_W * ATLAS_H * sizeof(uint32_t));
+  if (!rgba)
+  {
+    free(bitmap);
+    return NULL;
+  }
+  for (int i = 0; i < ATLAS_W * ATLAS_H; ++i)
+    rgba[i] = ((uint32_t)bitmap[i] << 24) | 0x00FFFFFFu;
+  free(bitmap);
+
+  SDL_Texture *tex =
+      SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, ATLAS_W, ATLAS_H);
+  if (!tex)
+  {
+    free(rgba);
+    return NULL;
+  }
+  SDL_UpdateTexture(tex, NULL, rgba, ATLAS_W * (int)sizeof(uint32_t));
+  free(rgba);
+  SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+  // The atlas is rasterized by stb_truetype at exactly the pixel size the
+  // caller will draw at; the glyphs already carry their own anti-aliased
+  // edges. Sampling with NEAREST avoids the extra bilinear blur SDL would
+  // otherwise apply at draw time (visible as soft, washed-out text even
+  // when source and destination rects are 1:1 in size).
+  SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_NEAREST);
+  return tex;
+}
+
+static Atlas *get_or_bake_atlas(SDL_Renderer *ren, int size_px)
+{
+  if (!g_font_loaded || size_px <= 0)
+    return NULL;
+  for (int i = 0; i < g_atlas_count; ++i)
+  {
+    if (g_atlases[i].size_px == size_px && g_atlases[i].texture)
+    {
+      g_atlases[i].last_used = ++g_use_counter;
+      return &g_atlases[i];
+    }
+  }
+
+  int slot;
+  if (g_atlas_count < MAX_ATLASES)
+  {
+    slot = g_atlas_count++;
+  }
+  else
+  {
+    slot = 0;
+    for (int i = 1; i < g_atlas_count; ++i)
+      if (g_atlases[i].last_used < g_atlases[slot].last_used)
+        slot = i;
+    if (g_atlases[slot].texture)
+      SDL_DestroyTexture(g_atlases[slot].texture);
+    memset(&g_atlases[slot], 0, sizeof(Atlas));
+  }
+
+  Atlas *a = &g_atlases[slot];
+  a->size_px = size_px;
+  a->texture = bake_atlas_texture(ren, size_px, a->chars);
+  if (!a->texture)
+  {
+    // Shrink the cache back so we don't poison a slot.
+    if (slot == g_atlas_count - 1)
+      g_atlas_count--;
+    return NULL;
+  }
+  a->last_used = ++g_use_counter;
+  return a;
+}
+
+int ui_text_ascent(int size_px)
+{
+  if (!g_font_loaded || size_px <= 0)
+    return 0;
+  int a, d, l;
+  stbtt_GetFontVMetrics(&g_font_info, &a, &d, &l);
+  const float scale = stbtt_ScaleForPixelHeight(&g_font_info, (float)size_px);
+  return (int)ceilf((float)a * scale);
+}
+
+int ui_text_line_height(int size_px)
+{
+  if (!g_font_loaded || size_px <= 0)
+    return size_px;
+  int a, d, l;
+  stbtt_GetFontVMetrics(&g_font_info, &a, &d, &l);
+  const float scale = stbtt_ScaleForPixelHeight(&g_font_info, (float)size_px);
+  return (int)ceilf(((float)(a - d) + (float)l) * scale);
+}
+
+// Width helper that doesn't need a renderer: uses font metrics directly.
+// This avoids forcing a renderer parameter into ui_text_width and keeps the
+// API symmetrical with the previous bitmap implementation.
+int ui_text_width(const char *s, int size_px)
+{
+  if (!g_font_loaded || !s || size_px <= 0)
+    return 0;
+  const float scale = stbtt_ScaleForPixelHeight(&g_font_info, (float)size_px);
+  float fx = 0.0f;
+  for (const char *p = s; *p; ++p)
+  {
+    unsigned char c = (unsigned char)*p;
+    if (c < GLYPH_FIRST || c >= GLYPH_FIRST + GLYPH_COUNT)
+      continue;
+    int adv = 0, lsb = 0;
+    stbtt_GetCodepointHMetrics(&g_font_info, c, &adv, &lsb);
+    fx += (float)adv * scale;
+    const unsigned char next = (unsigned char)*(p + 1);
+    if (next)
+      fx += (float)stbtt_GetCodepointKernAdvance(&g_font_info, c, next) * scale;
+  }
+  return (int)ceilf(fx);
+}
+
+void ui_text_draw(SDL_Renderer *ren, const char *s, int x, int y, int size_px)
+{
+  if (!ren || !s || !g_font_loaded || size_px <= 0)
+    return;
+  Atlas *a = get_or_bake_atlas(ren, size_px);
+  if (!a)
+    return;
+
+  Uint8 cr = 255, cg = 255, cb = 255, ca = 255;
+  SDL_GetRenderDrawColor(ren, &cr, &cg, &cb, &ca);
+  SDL_SetTextureColorMod(a->texture, cr, cg, cb);
+  SDL_SetTextureAlphaMod(a->texture, ca);
+
+  float fx = (float)x;
+  const float fy = (float)(y + ui_text_ascent(size_px));
+  for (const char *p = s; *p; ++p)
+  {
+    unsigned char c = (unsigned char)*p;
+    if (c < GLYPH_FIRST || c >= GLYPH_FIRST + GLYPH_COUNT)
+      continue;
+    stbtt_aligned_quad q;
+    float pen_y = fy;
+    stbtt_GetBakedQuad(a->chars, ATLAS_W, ATLAS_H, c - GLYPH_FIRST, &fx, &pen_y, &q, 1);
+    SDL_FRect src = {q.s0 * (float)ATLAS_W, q.t0 * (float)ATLAS_H, (q.s1 - q.s0) * (float)ATLAS_W,
+                     (q.t1 - q.t0) * (float)ATLAS_H};
+    SDL_FRect dst = {q.x0, q.y0, q.x1 - q.x0, q.y1 - q.y0};
+    SDL_RenderTexture(ren, a->texture, &src, &dst);
+  }
+}

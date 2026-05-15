@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.audio-visualizer.cli</string>
+    <key>CFBundleName</key>
+    <string>audio-visualizer</string>
+    <key>CFBundleExecutable</key>
+    <string>audio-visualizer</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>audio-visualizer visualizes system audio output as a real-time spectrogram.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>audio-visualizer visualizes microphone input as a real-time spectrogram.</string>
+</dict>
+</plist>
