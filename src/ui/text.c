@@ -24,11 +24,19 @@
 
 #include "text.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 
 #include <SDL3/SDL.h>
 
@@ -57,6 +65,9 @@ static Atlas g_atlases[MAX_ATLASES];
 static int g_atlas_count = 0;
 static uint64_t g_use_counter = 0;
 
+// Fast-path: well-known full paths we try in order before falling back to a
+// recursive directory scan. Anything that loads as a TTF/OTF/TTC works; we
+// don't require a monospace font.
 static const char *FONT_CANDIDATES[] = {
     "/System/Library/Fonts/SFNSMono.ttf",
     "/System/Library/Fonts/Menlo.ttc",
@@ -67,6 +78,31 @@ static const char *FONT_CANDIDATES[] = {
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/cantarell/Cantarell-Regular.otf",
+    "C:\\Windows\\Fonts\\consola.ttf",
+    "C:\\Windows\\Fonts\\cour.ttf",
+    "C:\\Windows\\Fonts\\segoeui.ttf",
+    "C:\\Windows\\Fonts\\arial.ttf",
+    NULL,
+};
+
+// Fallback: directories we recursively walk for any usable font file when no
+// candidate path matched. Covers a fresh Arch/Hyprland install where the user
+// has only installed e.g. JetBrains Mono via AUR or pulled in noto-fonts.
+static const char *FONT_DIRS[] = {
+#ifdef _WIN32
+    "C:\\Windows\\Fonts",
+#elif defined(__APPLE__)
+    "/System/Library/Fonts",
+    "/Library/Fonts",
+#else
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/run/current-system/sw/share/X11/fonts",
+#endif
     NULL,
 };
 
@@ -104,24 +140,144 @@ static unsigned char *read_file(const char *path, long *out_size)
   return buf;
 }
 
+static bool has_font_ext(const char *name)
+{
+  const char *dot = strrchr(name, '.');
+  if (!dot || dot == name || strlen(dot) != 4)
+    return false;
+  char ext[5];
+  for (int i = 0; i < 4; ++i)
+    ext[i] = (char)tolower((unsigned char)dot[i]);
+  ext[4] = '\0';
+  return strcmp(ext, ".ttf") == 0 || strcmp(ext, ".otf") == 0 || strcmp(ext, ".ttc") == 0;
+}
+
+static bool try_load_font_file(const char *path)
+{
+  long size = 0;
+  unsigned char *data = read_file(path, &size);
+  if (!data)
+    return false;
+  int offset = stbtt_GetFontOffsetForIndex(data, 0);
+  if (offset < 0 || !stbtt_InitFont(&g_font_info, data, offset))
+  {
+    free(data);
+    return false;
+  }
+  g_font_data = data;
+  g_font_loaded = true;
+  return true;
+}
+
+#ifdef _WIN32
+// Flat scan of a single directory. Windows fonts live at the top level of
+// C:\Windows\Fonts so we don't need to recurse.
+static bool scan_dir_for_font(const char *dir, int depth)
+{
+  (void)depth;
+  char pattern[MAX_PATH];
+  if (snprintf(pattern, sizeof pattern, "%s\\*", dir) <= 0)
+    return false;
+  WIN32_FIND_DATAA fd;
+  HANDLE h = FindFirstFileA(pattern, &fd);
+  if (h == INVALID_HANDLE_VALUE)
+    return false;
+  bool ok = false;
+  do
+  {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      continue;
+    if (!has_font_ext(fd.cFileName))
+      continue;
+    char path[MAX_PATH];
+    if (snprintf(path, sizeof path, "%s\\%s", dir, fd.cFileName) <= 0)
+      continue;
+    if (try_load_font_file(path))
+    {
+      ok = true;
+      break;
+    }
+  } while (FindNextFileA(h, &fd));
+  FindClose(h);
+  return ok;
+}
+#else
+// Bounded-depth recursive scan. Real font trees on Linux/macOS are shallow
+// (usually 2-3 levels), but cap depth so a pathological symlink loop can't
+// keep us recursing.
+static bool scan_dir_for_font(const char *dir, int depth)
+{
+  if (depth > 4)
+    return false;
+  DIR *d = opendir(dir);
+  if (!d)
+    return false;
+  bool ok = false;
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL)
+  {
+    if (e->d_name[0] == '.')
+      continue;
+    char path[1024];
+    int n = snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+    if (n < 0 || (size_t)n >= sizeof path)
+      continue;
+    struct stat st;
+    if (stat(path, &st) != 0)
+      continue;
+    if (S_ISDIR(st.st_mode))
+    {
+      if (scan_dir_for_font(path, depth + 1))
+      {
+        ok = true;
+        break;
+      }
+    }
+    else if (S_ISREG(st.st_mode) && has_font_ext(e->d_name) && try_load_font_file(path))
+    {
+      ok = true;
+      break;
+    }
+  }
+  closedir(d);
+  return ok;
+}
+#endif
+
 static bool load_font(void)
 {
   for (const char **pp = FONT_CANDIDATES; *pp; ++pp)
+    if (try_load_font_file(*pp))
+      return true;
+
+  for (const char **pp = FONT_DIRS; *pp; ++pp)
+    if (scan_dir_for_font(*pp, 0))
+      return true;
+
+#ifndef _WIN32
+  // Also try the user's per-account font directories. XDG_DATA_HOME wins over
+  // HOME if it's set (matches the spec); fall back to ~/.local/share/fonts and
+  // the legacy ~/.fonts location.
+  const char *xdg = getenv("XDG_DATA_HOME");
+  const char *home = getenv("HOME");
+  char buf[1024];
+  if (xdg && *xdg)
   {
-    long size = 0;
-    unsigned char *data = read_file(*pp, &size);
-    if (!data)
-      continue;
-    int offset = stbtt_GetFontOffsetForIndex(data, 0);
-    if (offset < 0 || !stbtt_InitFont(&g_font_info, data, offset))
-    {
-      free(data);
-      continue;
-    }
-    g_font_data = data;
-    g_font_loaded = true;
-    return true;
+    int n = snprintf(buf, sizeof buf, "%s/fonts", xdg);
+    if (n > 0 && (size_t)n < sizeof buf && scan_dir_for_font(buf, 0))
+      return true;
   }
+  if (home && *home)
+  {
+    static const char *user_subdirs[] = {".local/share/fonts", ".fonts", NULL};
+    for (const char **sp = user_subdirs; *sp; ++sp)
+    {
+      int n = snprintf(buf, sizeof buf, "%s/%s", home, *sp);
+      if (n > 0 && (size_t)n < sizeof buf && scan_dir_for_font(buf, 0))
+        return true;
+    }
+  }
+#endif
   return false;
 }
 

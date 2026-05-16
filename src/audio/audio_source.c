@@ -28,6 +28,8 @@ bool audio_source_init_file_miniaudio(AudioSource *src, const AudioSourceConfig 
 bool audio_source_init_mic_miniaudio(AudioSource *src, const AudioSourceConfig *config);
 #ifdef __APPLE__
 bool audio_source_init_system_macos(AudioSource *src, const AudioSourceConfig *config);
+#else
+bool audio_source_init_system_miniaudio(AudioSource *src, const AudioSourceConfig *config);
 #endif
 
 AudioSource *audio_source_create(const AudioSourceConfig *config)
@@ -55,7 +57,7 @@ AudioSource *audio_source_create(const AudioSourceConfig *config)
 #ifdef __APPLE__
     ok = audio_source_init_system_macos(src, config);
 #else
-    fprintf(stderr, "audio_source: system capture not implemented on this platform\n");
+    ok = audio_source_init_system_miniaudio(src, config);
 #endif
     break;
   default:

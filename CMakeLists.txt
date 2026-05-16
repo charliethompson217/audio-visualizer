@@ -42,6 +42,24 @@ target_link_libraries(audio-visualizer PRIVATE
     m
 )
 
+if(NOT APPLE)
+    # System-audio source for Linux (PulseAudio monitor) and Windows
+    # (WASAPI loopback). macOS uses its own Core Audio process-tap path.
+    target_sources(audio-visualizer PRIVATE
+        src/audio/source_system_miniaudio.c
+    )
+endif()
+
+if(UNIX AND NOT APPLE)
+    # miniaudio's Linux backends (ALSA/PulseAudio) load their client libraries
+    # at runtime via dlopen and use pthreads internally.
+    find_package(Threads REQUIRED)
+    target_link_libraries(audio-visualizer PRIVATE
+        Threads::Threads
+        ${CMAKE_DL_LIBS}
+    )
+endif()
+
 if(APPLE)
     enable_language(OBJC)
     target_sources(audio-visualizer PRIVATE

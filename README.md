@@ -7,19 +7,24 @@ or a generated test tone.
 
 ## Audio sources
 
-| Flag             | Source              | macOS | Linux            |
-| ---------------- | ------------------- | :---: | :--------------: |
-| `--test-tone`    | Generated sine      |  ✅   |        ✅        |
-| `--file PATH`    | Audio file playback |  ✅   |        ✅        |
-| `--mic`          | Microphone capture  |  ✅   |        ✅        |
-| `--system`       | System output mix   |  ✅   | ⏳ not yet (TBD) |
+| Flag          | Source              | macOS | Linux | Windows |
+| ------------- | ------------------- | :---: | :---: | :-----: |
+| `--test-tone` | Generated sine      |  ✅   |  ✅   |   ✅    |
+| `--file PATH` | Audio file playback |  ✅   |  ✅   |   ✅    |
+| `--mic`       | Microphone capture  |  ✅   |  ✅   |   ✅    |
+| `--system`    | System output mix   |  ✅   |  ✅   |   ✅    |
 
-Linux system-audio capture (PipeWire sink monitor) is planned but not yet
-implemented.
+System-audio capture is platform-specific:
+
+- macOS uses a Core Audio process tap (requires macOS 14.2+).
+- Linux captures from the default sink's PulseAudio monitor source. Works
+  against either PulseAudio or PipeWire's pulse compatibility layer
+  (`pipewire-pulse`).
+- Windows uses WASAPI loopback on the default render endpoint.
 
 ## Dependencies
 
-- CMake ≥ 3.20 and a C11 compiler (clang or gcc)
+- CMake ≥ 3.20 and a C11 compiler (clang, gcc, or MSVC)
 - [SDL3](https://wiki.libsdl.org/SDL3/) — window, renderer, input
 - [FFTW3](https://www.fftw.org/) (single-precision, `fftw3f`) — FFT
 - `pkg-config` — used by CMake to locate the above
@@ -48,6 +53,31 @@ sudo pacman -S cmake pkgconf sdl3 fftw
 Debian/Ubuntu: SDL3 may not yet be in the default repositories; build it from
 source from <https://github.com/libsdl-org/SDL> if no `libsdl3-dev` package
 is available. FFTW3F is provided by `libfftw3-dev`.
+
+### Windows
+
+Either MSYS2 (UCRT64 or MinGW64) or MSVC + vcpkg works.
+
+MSYS2 (UCRT64 shell):
+
+```sh
+pacman -S mingw-w64-ucrt-x86_64-cmake \
+          mingw-w64-ucrt-x86_64-pkgconf \
+          mingw-w64-ucrt-x86_64-sdl3 \
+          mingw-w64-ucrt-x86_64-fftw
+```
+
+vcpkg:
+
+```sh
+vcpkg install sdl3 fftw3
+# then point CMake at the vcpkg toolchain when configuring:
+#   cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake
+```
+
+The WASAPI loopback path miniaudio uses links only against system libraries
+that are already pulled in by the Windows SDK, so no extra link flags are
+needed.
 
 ## Build
 
@@ -80,6 +110,19 @@ prompt you must re-grant access in system settings.
 
 - **Microphone**: handled by the desktop's audio server (PipeWire / PulseAudio
   portal). On most distros, the first capture triggers a portal prompt.
+- **System audio** (`--system`): captures from the default sink's monitor
+  source over PulseAudio (or `pipewire-pulse`). No special permission prompt
+  on most setups — monitor sources are world-readable by default. If nothing
+  appears, ensure `pactl info` reports a `Default Sink` and that a `.monitor`
+  source exists in `pactl list short sources`.
+
+### Windows
+
+- **Microphone** (`--mic`): grant in *Settings → Privacy & security →
+  Microphone* (enable "Let desktop apps access your microphone").
+- **System audio** (`--system`): uses WASAPI loopback on the default output
+  device — no permission prompt required. Whatever is currently playing
+  through the default speakers/headphones is captured.
 
 ## Run
 
@@ -87,7 +130,7 @@ prompt you must re-grant access in system settings.
 ./build/audio-visualizer --test-tone
 ./build/audio-visualizer --file path/to/song.wav
 ./build/audio-visualizer --mic
-./build/audio-visualizer --system        # macOS only for now
+./build/audio-visualizer --system
 ```
 
 ## Runtime controls
