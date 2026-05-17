@@ -694,8 +694,7 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
   if (!c->visible)
     return false;
 
-  // Escape closes the modal (or an open dropdown first) while open;
-  // consume so the main loop doesn't also treat it as quit.
+  // Escape closes the modal (or an open dropdown first) while open.
   if (ev->type == SDL_EVENT_KEY_DOWN && ev->key.key == SDLK_ESCAPE)
   {
     if (c->open_dropdown >= 0)

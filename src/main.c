@@ -358,18 +358,15 @@ static void handle_events(AppState *app)
   while (SDL_PollEvent(&ev))
   {
     // The settings modal gets first dibs at events: it consumes its own
-    // toggle key, slider drags, and Escape-to-close while open.
+    // toggle key, slider drags, and Escape-to-close while open. Escape
+    // with no modal open is intentionally a no-op so an accidental tap
+    // can't quit the app while audio is playing.
     if (controls_handle_event(&app->controls, &ev, app))
       continue;
 
     if (ev.type == SDL_EVENT_QUIT)
     {
       app->running = false;
-    }
-    else if (ev.type == SDL_EVENT_KEY_DOWN)
-    {
-      if (ev.key.key == SDLK_ESCAPE)
-        app->running = false;
     }
     else if (ev.type == SDL_EVENT_WINDOW_RESIZED)
     {
