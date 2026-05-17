@@ -1,0 +1,4 @@
+/* Embeds the application icon into audiovisualizer.exe so Explorer,
+ * the taskbar, and the Start Menu show it. Windows uses the first
+ * icon resource (by ID) as the EXE icon. */
+IDI_ICON1 ICON "icon.ico"

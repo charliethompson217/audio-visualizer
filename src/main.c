@@ -1,5 +1,5 @@
 /*
- * audio-visualizer - A real-time audio visualizer.
+ * audiovisualizer - A real-time audio visualizer.
  * Copyright (C) 2026  Charles Thompson
  *
  * This program is free software: you can redistribute it and/or modify
@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 
 #include "analyzer/analyzer.h"
 #include "app_state.h"
@@ -121,7 +122,7 @@ static bool init_sdl(AppState *app)
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return false;
   }
-  SDL_Window *win = SDL_CreateWindow("audio-visualizer", app->window_width, app->window_height,
+  SDL_Window *win = SDL_CreateWindow("audiovisualizer", app->window_width, app->window_height,
                                      SDL_WINDOW_RESIZABLE);
   if (!win)
   {

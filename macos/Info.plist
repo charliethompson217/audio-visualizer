@@ -3,20 +3,30 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.audio-visualizer.cli</string>
+    <string>org.audiovisualizer.app</string>
     <key>CFBundleName</key>
-    <string>audio-visualizer</string>
+    <string>Audio Visualizer</string>
+    <key>CFBundleDisplayName</key>
+    <string>Audio Visualizer</string>
     <key>CFBundleExecutable</key>
-    <string>audio-visualizer</string>
+    <string>audiovisualizer</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.2</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>audio-visualizer visualizes system audio output as a real-time spectrogram.</string>
+    <string>Audio Visualizer visualizes system audio output as a real-time spectrogram.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>audio-visualizer visualizes microphone input as a real-time spectrogram.</string>
+    <string>Audio Visualizer visualizes microphone input as a real-time spectrogram.</string>
 </dict>
 </plist>

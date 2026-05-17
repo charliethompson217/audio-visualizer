@@ -1,5 +1,5 @@
 /*
- * audio-visualizer - A real-time audio visualizer.
+ * audiovisualizer - A real-time audio visualizer.
  * Copyright (C) 2026  Charles Thompson
  *
  * This program is free software: you can redistribute it and/or modify

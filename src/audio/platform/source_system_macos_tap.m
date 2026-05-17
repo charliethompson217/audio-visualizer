@@ -1,5 +1,5 @@
 /*
- * audio-visualizer - A real-time audio visualizer.
+ * audiovisualizer - A real-time audio visualizer.
  * Copyright (C) 2026  Charles Thompson
  *
  * This program is free software: you can redistribute it and/or modify
@@ -240,7 +240,7 @@ bool audio_source_init_system_macos(AudioSource *src, const AudioSourceConfig *c
   // (process objects), NOT PIDs — different ID space. Passing an empty array
   // avoids that translation entirely and is what AudioCap does.
   CATapDescription *desc = [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]];
-  desc.name = @"audio-visualizer system tap";
+  desc.name = @"audiovisualizer system tap";
   // Pre-assign the tap's UUID so we can reference it in the aggregate device
   // configuration below without round-tripping through kAudioTapPropertyUID.
   desc.UUID = [NSUUID UUID];
@@ -274,7 +274,7 @@ bool audio_source_init_system_macos(AudioSource *src, const AudioSourceConfig *c
   NSString *agg_uid = [[NSUUID UUID] UUIDString];
   NSString *tap_uid = [desc.UUID UUIDString];
   NSDictionary *agg_cfg = @{
-    @(kAudioAggregateDeviceNameKey) : @"audio-visualizer-aggregate",
+    @(kAudioAggregateDeviceNameKey) : @"audiovisualizer-aggregate",
     @(kAudioAggregateDeviceUIDKey) : agg_uid,
     @(kAudioAggregateDeviceMainSubDeviceKey) : out_uid,
     @(kAudioAggregateDeviceIsPrivateKey) : @YES,

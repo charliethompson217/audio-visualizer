@@ -1,4 +1,4 @@
-# audio-visualizer
+# audiovisualizer
 
 A small native C application that visualizes real-time audio as a log-frequency
 (musical semitone) bar spectrum and waveform. Audio input is modular: the core
@@ -86,7 +86,18 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
-The binary is produced at `build/audio-visualizer`.
+Build outputs:
+
+- **macOS**: `build/audiovisualizer.app` — a regular `.app` bundle with the
+  icon, `Info.plist`, and an ad-hoc code signature. Double-click it in Finder,
+  drag it to `/Applications`, or pin it to the Dock. The executable inside is
+  `build/audiovisualizer.app/Contents/MacOS/audiovisualizer` if you want to
+  run with CLI flags.
+- **Windows**: `build/audiovisualizer.exe` — a GUI-subsystem executable (no
+  console window opens) with the icon embedded as a resource.
+- **Linux**: `build/audiovisualizer` — a plain ELF binary. Packaging into
+  `.desktop` entries / Flatpak / AppImage / distro packages is left to the
+  user.
 
 ## OS permissions
 
@@ -100,9 +111,9 @@ prompt you must re-grant access in system settings.
   Microphone* (the terminal application running the binary appears in the list).
 - **System audio** (`--system`): uses a Core Audio process tap, which requires
   macOS 14.2+ and grant in *System Settings → Privacy & Security → Audio
-  Capture*. The build embeds an `Info.plist` (with `CFBundleIdentifier`,
-  `NSAudioCaptureUsageDescription`, `NSMicrophoneUsageDescription`) and ad-hoc
-  code-signs the binary so TCC can identify it; without this the OS denies the
+  Capture*. The `.app` bundle ships an `Info.plist` (with `CFBundleIdentifier`,
+  `NSAudioCaptureUsageDescription`, `NSMicrophoneUsageDescription`) and is
+  ad-hoc code-signed so TCC can identify it; without this the OS denies the
   tap silently. This is handled automatically by CMake — no manual signing
   required.
 
@@ -126,12 +137,25 @@ prompt you must re-grant access in system settings.
 
 ## Run
 
+From the build directory (Linux, or to pass CLI flags on any platform):
+
 ```sh
-./build/audio-visualizer --test-tone
-./build/audio-visualizer --file path/to/song.wav
-./build/audio-visualizer --mic
-./build/audio-visualizer --system
+./build/audiovisualizer --test-tone
+./build/audiovisualizer --file path/to/song.wav
+./build/audiovisualizer --mic
+./build/audiovisualizer --system
 ```
+
+On macOS you can also just launch the `.app` (defaults to `--system`):
+
+```sh
+open build/audiovisualizer.app
+# or, to pass flags:
+build/audiovisualizer.app/Contents/MacOS/audiovisualizer --mic
+```
+
+On Windows, double-click `build\audiovisualizer.exe` or invoke it from a
+shell with flags.
 
 ## Runtime controls
 
