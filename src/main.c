@@ -137,6 +137,11 @@ static bool init_sdl(AppState *app)
     fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
     return false;
   }
+  // Lower bound on the window size: keep the settings modal usable
+  // (modal_w needs >= 420 + 2*pad) and stop the UI from collapsing into
+  // an unreadable sliver. Height floor is intentionally low so the user
+  // can squeeze the window into a thin strip if they want.
+  SDL_SetWindowMinimumSize(win, 480, 240);
   // SDL disables the screensaver by default while a window is open. For a
   // visualizer that's wrong — we have no reason to inhibit display sleep or
   // the OS power-management daemon, so let the OS behave normally.
@@ -341,6 +346,140 @@ static bool apply_pending_resize(AppState *app)
   return true;
 }
 
+// One frame of the main loop, minus event handling. Pulls fresh PCM,
+// runs FFT/waveform analysis, composites the pixel buffer, and presents.
+// Factored out so it can also be driven from a resize event watcher (on
+// macOS, AppKit runs a modal tracking loop during live window resize
+// that blocks the main loop's SDL_PollEvent; calling draw_frame from
+// SDL_AddEventWatch keeps the visualizer ticking through the resize).
+static void draw_frame(AppState *app)
+{
+  if (app->analyzer_config_dirty)
+  {
+    if (!analyzer_reconfigure(&app->analyzer, &app->analyzer_config))
+    {
+      fprintf(stderr, "analyzer_reconfigure failed; bailing out\n");
+      app->running = false;
+      return;
+    }
+    free(app->analysis_samples);
+    app->analysis_samples = (float *)calloc(app->analyzer_config.fft_size, sizeof(float));
+    if (!app->analysis_samples)
+    {
+      app->running = false;
+      return;
+    }
+    app->analyzer_config_dirty = false;
+  }
+
+  if (pcm_ring_copy_latest(&app->ring, app->analysis_samples, app->analyzer_config.fft_size))
+  {
+    analyzer_process(&app->analyzer, app->analysis_samples);
+  }
+  if (app->visualizer_config.show_waveform && app->waveform_samples)
+  {
+    pcm_ring_copy_latest(&app->ring, app->waveform_samples, app->waveform_size);
+  }
+
+  // Periodic peak-bin diagnostic. Static state so the cadence is shared
+  // whether we're driven by the main loop or the resize watcher.
+  static uint64_t last_diag_ms = 0;
+  const uint64_t now_ms = SDL_GetTicks();
+  if (now_ms - last_diag_ms >= 1500)
+  {
+    const AnalyzerOutput *o = analyzer_output(&app->analyzer);
+    const int K = 3, SUPP = 3;
+    uint32_t top[3] = {0, 0, 0};
+    float topv[3] = {-1e30f, -1e30f, -1e30f};
+    for (int k = 0; k < K; ++k)
+    {
+      for (uint32_t i = 1; i < o->bin_count; ++i)
+      {
+        bool blocked = false;
+        for (int j = 0; j < k && !blocked; ++j)
+        {
+          int d = (int)i - (int)top[j];
+          if (d < 0)
+            d = -d;
+          if (d <= SUPP)
+            blocked = true;
+        }
+        if (blocked)
+          continue;
+        const float v = o->db[i];
+        if (v > topv[k])
+        {
+          topv[k] = v;
+          top[k] = i;
+        }
+      }
+    }
+    const float hz_per_bin =
+        (float)app->analyzer_config.sample_rate / (float)app->analyzer_config.fft_size;
+    fprintf(stdout, "[fft] peaks: ");
+    for (int k = 0; k < K; ++k)
+    {
+      const float freq = (float)top[k] * hz_per_bin;
+      fprintf(stdout, "bin=%u(%.1fHz, db=%.1f, e=%.2f)%s", top[k], (double)freq,
+              (double)o->db[top[k]], (double)o->smoothed_energy[top[k]], k < K - 1 ? "  " : "\n");
+    }
+    fflush(stdout);
+    last_diag_ms = now_ms;
+  }
+
+  // Clear once, then composite each enabled view into the same buffer.
+  // When both are on the spectrum sits behind the waveform; when only
+  // one is enabled it occupies the full canvas naturally.
+  pixel_buffer_clear(&app->pixel_buffer, 0);
+  if (app->visualizer_config.show_spectrum)
+  {
+    renderer_draw_spectrum(&app->renderer, &app->pixel_buffer, analyzer_output(&app->analyzer),
+                           analyzer_config(&app->analyzer), &app->visualizer_config);
+  }
+  if (app->visualizer_config.show_waveform && app->waveform_samples)
+  {
+    renderer_draw_waveform(&app->pixel_buffer, app->waveform_samples, (int)app->waveform_size,
+                           &app->visualizer_config);
+  }
+
+  SDL_UpdateTexture((SDL_Texture *)app->sdl_texture, NULL, app->pixel_buffer.pixels,
+                    app->pixel_buffer.stride);
+  SDL_RenderClear((SDL_Renderer *)app->sdl_renderer);
+  SDL_RenderTexture((SDL_Renderer *)app->sdl_renderer, (SDL_Texture *)app->sdl_texture, NULL, NULL);
+  overlay_render((SDL_Renderer *)app->sdl_renderer, app);
+  controls_render(&app->controls, (SDL_Renderer *)app->sdl_renderer, app);
+  SDL_RenderPresent((SDL_Renderer *)app->sdl_renderer);
+}
+
+// Event watcher invoked synchronously from SDL_PumpEvents — including
+// from the AppKit modal tracking loop that runs during macOS live window
+// resize. We forward resize/expose events into the normal pending-resize
+// path and then drive one extra frame so the spectrum keeps animating
+// while the user is dragging the window edge.
+static bool SDLCALL on_resize_watch(void *userdata, SDL_Event *ev)
+{
+  AppState *app = (AppState *)userdata;
+  if (!app)
+    return true;
+  if (ev->type == SDL_EVENT_WINDOW_RESIZED || ev->type == SDL_EVENT_WINDOW_EXPOSED)
+  {
+    if (ev->type == SDL_EVENT_WINDOW_RESIZED)
+    {
+      const int w = ev->window.data1;
+      const int h = ev->window.data2;
+      if (w > 0 && h > 0)
+      {
+        app->pending_window_width = w;
+        app->pending_window_height = h;
+        app->resize_pending = true;
+      }
+    }
+    if (apply_pending_resize(app))
+      draw_frame(app);
+  }
+  return true;
+}
+
 static void cleanup(AppState *app)
 {
   if (app->source)
@@ -475,7 +614,10 @@ int main(int argc, char **argv)
           window_fn_name(app.analyzer_config.window_function));
   fflush(stdout);
 
-  uint64_t last_diag_ms = SDL_GetTicks();
+  // Register the resize watcher only after every subsystem the frame
+  // touches (analyzer, renderer, audio source) is initialized — the
+  // watcher can fire as soon as it's installed.
+  SDL_AddEventWatch(on_resize_watch, &app);
 
   while (app.running)
   {
@@ -487,103 +629,10 @@ int main(int argc, char **argv)
       break;
     }
 
-    if (app.analyzer_config_dirty)
-    {
-      if (!analyzer_reconfigure(&app.analyzer, &app.analyzer_config))
-      {
-        fprintf(stderr, "analyzer_reconfigure failed; bailing out\n");
-        app.running = false;
-        break;
-      }
-      free(app.analysis_samples);
-      app.analysis_samples = (float *)calloc(app.analyzer_config.fft_size, sizeof(float));
-      if (!app.analysis_samples)
-      {
-        app.running = false;
-        break;
-      }
-      app.analyzer_config_dirty = false;
-    }
-
-    if (pcm_ring_copy_latest(&app.ring, app.analysis_samples, app.analyzer_config.fft_size))
-    {
-      analyzer_process(&app.analyzer, app.analysis_samples);
-    }
-    if (app.visualizer_config.show_waveform && app.waveform_samples)
-    {
-      pcm_ring_copy_latest(&app.ring, app.waveform_samples, app.waveform_size);
-    }
-
-    const uint64_t now_ms = SDL_GetTicks();
-    if (now_ms - last_diag_ms >= 1500)
-    {
-      const AnalyzerOutput *o = analyzer_output(&app.analyzer);
-      // Find 3 distinct peaks by suppressing a ±3-bin window after each pick.
-      // Rank by raw dB; energy[] saturates inside loud lobes so it's not a
-      // reliable discriminator for "loudest bin in this lobe".
-      const int K = 3, SUPP = 3;
-      uint32_t top[3] = {0, 0, 0};
-      float topv[3] = {-1e30f, -1e30f, -1e30f};
-      for (int k = 0; k < K; ++k)
-      {
-        for (uint32_t i = 1; i < o->bin_count; ++i)
-        {
-          bool blocked = false;
-          for (int j = 0; j < k && !blocked; ++j)
-          {
-            int d = (int)i - (int)top[j];
-            if (d < 0)
-              d = -d;
-            if (d <= SUPP)
-              blocked = true;
-          }
-          if (blocked)
-            continue;
-          const float v = o->db[i];
-          if (v > topv[k])
-          {
-            topv[k] = v;
-            top[k] = i;
-          }
-        }
-      }
-      const float hz_per_bin =
-          (float)app.analyzer_config.sample_rate / (float)app.analyzer_config.fft_size;
-      fprintf(stdout, "[fft] peaks: ");
-      for (int k = 0; k < K; ++k)
-      {
-        const float freq = (float)top[k] * hz_per_bin;
-        fprintf(stdout, "bin=%u(%.1fHz, db=%.1f, e=%.2f)%s", top[k], (double)freq,
-                (double)o->db[top[k]], (double)o->smoothed_energy[top[k]], k < K - 1 ? "  " : "\n");
-      }
-      fflush(stdout);
-      last_diag_ms = now_ms;
-    }
-
-    // Clear once, then composite each enabled view into the same buffer.
-    // When both are on the spectrum sits behind the waveform; when only
-    // one is enabled it occupies the full canvas naturally.
-    pixel_buffer_clear(&app.pixel_buffer, 0);
-    if (app.visualizer_config.show_spectrum)
-    {
-      renderer_draw_spectrum(&app.renderer, &app.pixel_buffer, analyzer_output(&app.analyzer),
-                             analyzer_config(&app.analyzer), &app.visualizer_config);
-    }
-    if (app.visualizer_config.show_waveform && app.waveform_samples)
-    {
-      renderer_draw_waveform(&app.pixel_buffer, app.waveform_samples, (int)app.waveform_size,
-                             &app.visualizer_config);
-    }
-
-    SDL_UpdateTexture((SDL_Texture *)app.sdl_texture, NULL, app.pixel_buffer.pixels,
-                      app.pixel_buffer.stride);
-    SDL_RenderClear((SDL_Renderer *)app.sdl_renderer);
-    SDL_RenderTexture((SDL_Renderer *)app.sdl_renderer, (SDL_Texture *)app.sdl_texture, NULL, NULL);
-    overlay_render((SDL_Renderer *)app.sdl_renderer, &app);
-    controls_render(&app.controls, (SDL_Renderer *)app.sdl_renderer, &app);
-    SDL_RenderPresent((SDL_Renderer *)app.sdl_renderer);
+    draw_frame(&app);
   }
 
+  SDL_RemoveEventWatch(on_resize_watch, &app);
   cleanup(&app);
   return 0;
 }

@@ -39,6 +39,17 @@ typedef struct Controls
 
   // Currently open dropdown widget, or -1 when no dropdown is open.
   int open_dropdown;
+
+  // Vertical scroll for the rows region, in logical pixels. Non-zero
+  // only when the modal is too short to show every row. Clamped to
+  // [0, max_scroll] each time the layout is computed.
+  float scroll_offset;
+
+  // True while the user is dragging the scrollbar thumb. Together with
+  // the grab/start values, drives the proportional scroll math.
+  bool scrollbar_dragging;
+  float scrollbar_grab_y;
+  float scrollbar_grab_scroll;
 } Controls;
 
 void controls_init(Controls *c);

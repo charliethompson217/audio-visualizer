@@ -330,7 +330,7 @@ typedef struct Layout
 {
   int modal_x, modal_y, modal_w, modal_h;
   int row_h;
-  int row_y0; // top of first slider row
+  int row_y0; // top of first slider row, already shifted by -scroll_offset
   int label_x;
   int label_w;
   int track_x;
@@ -339,6 +339,14 @@ typedef struct Layout
   int value_w;
   int text_size_px;  // body text size for labels/values
   int title_size_px; // modal title size
+
+  // Scrollable rows region. Rendering clips to (viewport_y0, viewport_y1)
+  // and click hit-testing rejects ys outside that band.
+  int viewport_y0;
+  int viewport_y1;
+  int max_scroll;  // 0 when all rows fit; otherwise content_h - viewport_h
+  int scrollbar_x; // 0 when scrollbar_w == 0
+  int scrollbar_w; // 0 when not scrollable
 } Layout;
 
 static int imin(int a, int b)
@@ -350,7 +358,10 @@ static int imax(int a, int b)
   return a > b ? a : b;
 }
 
-static void compute_layout(int win_w, int win_h, Layout *L)
+// Builds the per-frame layout from the current window size and persistent
+// controls state. Clamps `c->scroll_offset` to the current valid range so
+// callers can read it back safely.
+static void compute_layout(int win_w, int win_h, Controls *c, Layout *L)
 {
   const int pad = 28;
   const int title_h = 44;
@@ -360,8 +371,15 @@ static void compute_layout(int win_w, int win_h, Layout *L)
   L->text_size_px = UI_TEXT_MEDIUM;
   L->title_size_px = UI_TEXT_TITLE;
 
+  // Natural height needed to show every row without scrolling.
+  const int natural_h = title_h + SID_COUNT * row_h + 2 * pad;
+  // Available height: leave a `pad` margin top and bottom, but enforce a
+  // minimum that still shows the title plus a couple of rows.
+  const int min_modal_h = title_h + 2 * row_h + 2 * pad;
+  const int max_modal_h = imax(min_modal_h, win_h - 2 * pad);
+  L->modal_h = imin(natural_h, max_modal_h);
+
   L->modal_w = imin(720, imax(420, win_w - 2 * pad));
-  L->modal_h = title_h + SID_COUNT * row_h + 2 * pad;
   L->modal_x = (win_w - L->modal_w) / 2;
   L->modal_y = (win_h - L->modal_h) / 2;
   if (L->modal_x < 0)
@@ -371,7 +389,25 @@ static void compute_layout(int win_w, int win_h, Layout *L)
 
   const int inner_x = L->modal_x + pad;
   const int inner_w = L->modal_w - 2 * pad;
-  L->row_y0 = L->modal_y + pad + title_h;
+
+  L->viewport_y0 = L->modal_y + pad + title_h;
+  L->viewport_y1 = L->modal_y + L->modal_h - pad;
+  const int viewport_h = imax(0, L->viewport_y1 - L->viewport_y0);
+  const int content_h = SID_COUNT * row_h;
+  L->max_scroll = imax(0, content_h - viewport_h);
+
+  if (c)
+    c->scroll_offset = clamp_f(c->scroll_offset, 0.0f, (float)L->max_scroll);
+  const int scroll = c ? (int)c->scroll_offset : 0;
+
+  // row_y0 is the visual top of the first row, post-scroll. Off-screen
+  // rows are filtered out by hit-testing and clipped at render time.
+  L->row_y0 = L->viewport_y0 - scroll;
+
+  // Scrollbar lives in the right padding so it doesn't eat into the
+  // value column. Width fixed; gap to the modal edge is half the pad.
+  L->scrollbar_w = (L->max_scroll > 0) ? 6 : 0;
+  L->scrollbar_x = L->modal_x + L->modal_w - pad / 2 - L->scrollbar_w;
 
   L->label_w = 220;
   L->value_w = 90;
@@ -426,6 +462,32 @@ static void dropdown_option_rect(const Layout *L, int slider_index, int option_i
   out->h = btn.h;
 }
 
+// Scrollbar thumb rect for the current scroll offset, or zero-w rect when
+// the modal isn't scrollable. Thumb height is proportional to the visible
+// fraction of the rows; minimum 24 px so it stays grabbable.
+static void scrollbar_thumb_rect(const Layout *L, float scroll_offset, SDL_FRect *out)
+{
+  out->x = 0.0f;
+  out->y = 0.0f;
+  out->w = 0.0f;
+  out->h = 0.0f;
+  if (L->scrollbar_w <= 0 || L->max_scroll <= 0)
+    return;
+  const float viewport_h = (float)(L->viewport_y1 - L->viewport_y0);
+  const float content_h = (float)(SID_COUNT * L->row_h);
+  float thumb_h = viewport_h * (viewport_h / content_h);
+  if (thumb_h < 24.0f)
+    thumb_h = 24.0f;
+  if (thumb_h > viewport_h)
+    thumb_h = viewport_h;
+  const float travel = viewport_h - thumb_h;
+  const float t = (L->max_scroll > 0) ? (scroll_offset / (float)L->max_scroll) : 0.0f;
+  out->x = (float)L->scrollbar_x;
+  out->y = (float)L->viewport_y0 + t * travel;
+  out->w = (float)L->scrollbar_w;
+  out->h = thumb_h;
+}
+
 // ---------------------------------------------------------------------------
 // Hit testing + event handling.
 // ---------------------------------------------------------------------------
@@ -435,9 +497,13 @@ static bool point_in_rect(const SDL_FRect *r, float mx, float my)
   return mx >= r->x && mx < r->x + r->w && my >= r->y && my < r->y + r->h;
 }
 
-// Row index whose widget rect contains (mx, my), or -1.
+// Row index whose widget rect contains (mx, my), or -1. Clicks landing
+// outside the scrollable viewport are rejected so rows scrolled out of
+// sight stay un-clickable.
 static int hit_test_widget(const Layout *L, float mx, float my)
 {
+  if (my < (float)L->viewport_y0 || my >= (float)L->viewport_y1)
+    return -1;
   for (int i = 0; i < SID_COUNT; ++i)
   {
     SDL_FRect r;
@@ -491,6 +557,10 @@ void controls_init(Controls *c)
   c->hovered = -1;
   c->dragging = -1;
   c->open_dropdown = -1;
+  c->scroll_offset = 0.0f;
+  c->scrollbar_dragging = false;
+  c->scrollbar_grab_y = 0.0f;
+  c->scrollbar_grab_scroll = 0.0f;
 }
 
 void controls_toggle(Controls *c)
@@ -501,6 +571,7 @@ void controls_toggle(Controls *c)
   c->dragging = -1;
   c->hovered = -1;
   c->open_dropdown = -1;
+  c->scrollbar_dragging = false;
 }
 
 bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
@@ -530,17 +601,49 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
   }
 
   Layout L;
-  compute_layout(app->window_width, app->window_height, &L);
+  compute_layout(app->window_width, app->window_height, c, &L);
 
   switch (ev->type)
   {
+  case SDL_EVENT_MOUSE_WHEEL:
+  {
+    if (L.max_scroll <= 0)
+      return false;
+    float mx = 0.0f, my = 0.0f;
+    SDL_GetMouseState(&mx, &my);
+    if (!point_in_modal(&L, mx, my))
+      return false;
+    // SDL reports wheel ticks; one notch ≈ a couple of rows.
+    const float step = (float)L.row_h * 2.0f;
+    c->scroll_offset = clamp_f(c->scroll_offset - ev->wheel.y * step, 0.0f, (float)L.max_scroll);
+    // Anchored dropdown popups can't follow a scroll; close them.
+    c->open_dropdown = -1;
+    return true;
+  }
+
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
     if (ev->button.button == SDL_BUTTON_LEFT)
     {
       const float mx = ev->button.x;
       const float my = ev->button.y;
 
-      // 1. If a dropdown is open, give it first crack at the click.
+      // 1. Scrollbar thumb takes priority so a click that happens to be
+      // on top of a row widget at the right edge still grabs the thumb.
+      if (L.max_scroll > 0)
+      {
+        SDL_FRect thumb;
+        scrollbar_thumb_rect(&L, c->scroll_offset, &thumb);
+        if (point_in_rect(&thumb, mx, my))
+        {
+          c->scrollbar_dragging = true;
+          c->scrollbar_grab_y = my;
+          c->scrollbar_grab_scroll = c->scroll_offset;
+          c->open_dropdown = -1;
+          return true;
+        }
+      }
+
+      // 2. If a dropdown is open, give it first crack at the click.
       if (c->open_dropdown >= 0)
       {
         const int opt = hit_test_dropdown_option(&L, c->open_dropdown, mx, my);
@@ -555,7 +658,7 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
         c->open_dropdown = -1;
       }
 
-      // 2. Hit-test the row widgets.
+      // 3. Hit-test the row widgets.
       const int hit = hit_test_widget(&L, mx, my);
       if (hit >= 0)
       {
@@ -584,10 +687,20 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
     return false;
 
   case SDL_EVENT_MOUSE_BUTTON_UP:
-    if (ev->button.button == SDL_BUTTON_LEFT && c->dragging >= 0)
+    if (ev->button.button == SDL_BUTTON_LEFT)
     {
-      c->dragging = -1;
-      return true;
+      bool consumed = false;
+      if (c->scrollbar_dragging)
+      {
+        c->scrollbar_dragging = false;
+        consumed = true;
+      }
+      if (c->dragging >= 0)
+      {
+        c->dragging = -1;
+        consumed = true;
+      }
+      return consumed;
     }
     return false;
 
@@ -595,6 +708,23 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
   {
     const float mx = ev->motion.x;
     const float my = ev->motion.y;
+    if (c->scrollbar_dragging && L.max_scroll > 0)
+    {
+      // Translate vertical mouse travel into scroll offset along the
+      // thumb's track. Recompute thumb_h from the current layout so a
+      // resize mid-drag stays consistent.
+      SDL_FRect thumb;
+      scrollbar_thumb_rect(&L, c->scrollbar_grab_scroll, &thumb);
+      const float viewport_h = (float)(L.viewport_y1 - L.viewport_y0);
+      const float travel = viewport_h - thumb.h;
+      if (travel > 0.0f)
+      {
+        const float dy = my - c->scrollbar_grab_y;
+        const float new_offset = c->scrollbar_grab_scroll + dy * ((float)L.max_scroll / travel);
+        c->scroll_offset = clamp_f(new_offset, 0.0f, (float)L.max_scroll);
+      }
+      return true;
+    }
     c->hovered = hit_test_widget(&L, mx, my);
     if (c->dragging >= 0)
     {
@@ -728,7 +858,7 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
     return;
 
   Layout L;
-  compute_layout(app->window_width, app->window_height, &L);
+  compute_layout(app->window_width, app->window_height, c, &L);
 
   SDL_BlendMode prev_blend = SDL_BLENDMODE_NONE;
   SDL_GetRenderDrawBlendMode(ren, &prev_blend);
@@ -754,6 +884,21 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
   const int title_w = ui_text_width(title, L.title_size_px);
   ui_text_draw(ren, title, L.modal_x + (L.modal_w - title_w) / 2, L.modal_y + 18, L.title_size_px);
 
+  // Clip the rows region so scrolled-out rows don't bleed into the title
+  // band or past the modal's bottom edge. Saved prior clip is restored
+  // before returning.
+  SDL_Rect prev_clip = {0, 0, 0, 0};
+  const bool had_clip = SDL_RenderClipEnabled(ren);
+  if (had_clip)
+    SDL_GetRenderClipRect(ren, &prev_clip);
+  const SDL_Rect rows_clip = {
+      L.modal_x,
+      L.viewport_y0,
+      L.modal_w,
+      L.viewport_y1 - L.viewport_y0,
+  };
+  SDL_SetRenderClipRect(ren, &rows_clip);
+
   // Per-row label, widget, and value text.
   for (int i = 0; i < SID_COUNT; ++i)
   {
@@ -762,6 +907,9 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
 
     SDL_FRect w;
     widget_rect(&L, i, &w);
+    // Skip rows fully outside the viewport.
+    if (w.y + w.h < (float)L.viewport_y0 || w.y >= (float)L.viewport_y1)
+      continue;
     const int text_y = text_y_for_rect(w.y, w.h, L.text_size_px);
 
     // Label.
@@ -790,6 +938,32 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
       SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
       ui_text_draw(ren, buf, L.value_x, text_y, L.text_size_px);
     }
+  }
+
+  // Restore the prior clip rect before drawing the scrollbar and the
+  // open dropdown popup, both of which intentionally draw outside the
+  // rows-clip band.
+  if (had_clip)
+    SDL_SetRenderClipRect(ren, &prev_clip);
+  else
+    SDL_SetRenderClipRect(ren, NULL);
+
+  // Scrollbar (track + thumb) along the modal's right padding.
+  if (L.max_scroll > 0)
+  {
+    SDL_FRect track = {
+        (float)L.scrollbar_x,
+        (float)L.viewport_y0,
+        (float)L.scrollbar_w,
+        (float)(L.viewport_y1 - L.viewport_y0),
+    };
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, 30);
+    SDL_RenderFillRect(ren, &track);
+
+    SDL_FRect thumb;
+    scrollbar_thumb_rect(&L, c->scroll_offset, &thumb);
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, c->scrollbar_dragging ? 220 : 160);
+    SDL_RenderFillRect(ren, &thumb);
   }
 
   // Open dropdown popup is drawn last so it overlaps later rows cleanly.
