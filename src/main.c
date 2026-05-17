@@ -129,6 +129,27 @@ static bool init_sdl(AppState *app)
     fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
     return false;
   }
+  // SDL disables the screensaver by default while a window is open. For a
+  // visualizer that's wrong — we have no reason to inhibit display sleep or
+  // the OS power-management daemon, so let the OS behave normally.
+  SDL_EnableScreenSaver();
+
+#ifdef __APPLE__
+  // SDL3's default renderer on macOS is Metal, which puts a CAMetalLayer-
+  // backed NSView on the window. That view hooks into the display
+  // compositor in a way that fights the brightness daemon: while the app
+  // is running, brightness adjustments jump and get stuck (most painfully,
+  // turning brightness all the way down can lock it there until the app
+  // quits). The software renderer is affected too because it presents
+  // through the same CAMetalLayer.
+  //
+  // The OpenGL backend uses a legacy NSOpenGLView instead and doesn't
+  // exhibit the bug. Our rendering is trivial enough (one streaming
+  // texture + a few overlay primitives) that the perf difference is
+  // negligible. OpenGL is deprecated on macOS but still ships in Tahoe;
+  // revisit if Apple actually removes it.
+  SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+#endif
   SDL_Renderer *ren = SDL_CreateRenderer(win, NULL);
   if (!ren)
   {
