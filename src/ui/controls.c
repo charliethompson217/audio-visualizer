@@ -37,7 +37,12 @@
 
 typedef enum SliderId
 {
-  SID_SHOW_SPECTRUM = 0,
+  // Source selection rows live at the top of the panel. BROWSE_FILE and
+  // SOURCE_ERROR are conditionally visible (see row_visible() below).
+  SID_SOURCE = 0,
+  SID_BROWSE_FILE,
+  SID_SOURCE_ERROR,
+  SID_SHOW_SPECTRUM,
   SID_SHOW_WAVEFORM,
   SID_WAVEFORM_V_SCALE,
   SID_WAVEFORM_H_SCALE,
@@ -60,6 +65,12 @@ typedef enum SliderKind
   SK_FLOAT,
   SK_BOOL,
   SK_DROPDOWN_UINT,
+  // Clickable row that fires an action (no associated value). Currently
+  // used for the BROWSE FILE… row.
+  SK_BUTTON,
+  // Read-only row that renders a dynamic text label (no widget). Used for
+  // the in-modal source error message.
+  SK_LABEL,
 } SliderKind;
 
 typedef struct SliderDef
@@ -87,7 +98,15 @@ static const uint32_t WINDOW_FN_VALUES[] = {WINDOW_RECTANGULAR, WINDOW_HANN, WIN
                                             WINDOW_BLACKMAN};
 static const char *WINDOW_FN_LABELS[] = {"RECTANGULAR", "HANN", "HAMMING", "BLACKMAN"};
 
+static const uint32_t SOURCE_KINDS[] = {AUDIO_SOURCE_TEST_TONE, AUDIO_SOURCE_FILE, AUDIO_SOURCE_MIC,
+                                        AUDIO_SOURCE_SYSTEM};
+static const char *SOURCE_LABELS[] = {"TEST TONE", "FILE", "MIC", "SYSTEM"};
+
 static const SliderDef SLIDERS[SID_COUNT] = {
+    [SID_SOURCE] = {"SOURCE", SK_DROPDOWN_UINT, 0.0f, 0.0f, SOURCE_KINDS,
+                    (int)(sizeof(SOURCE_KINDS) / sizeof(SOURCE_KINDS[0])), 0, false, SOURCE_LABELS},
+    [SID_BROWSE_FILE] = {"FILE", SK_BUTTON, 0.0f, 0.0f, NULL, 0, 0, false, NULL},
+    [SID_SOURCE_ERROR] = {"", SK_LABEL, 0.0f, 0.0f, NULL, 0, 0, false, NULL},
     [SID_SHOW_SPECTRUM] = {"SHOW SPECTRUM", SK_BOOL, 0.0f, 1.0f, NULL, 0, 0, false, NULL},
     [SID_SHOW_WAVEFORM] = {"SHOW WAVEFORM", SK_BOOL, 0.0f, 1.0f, NULL, 0, 0, false, NULL},
     [SID_WAVEFORM_V_SCALE] = {"WAVEFORM V SCALE", SK_FLOAT, 0.1f, 10.0f, NULL, 0, 2, false, NULL},
@@ -130,6 +149,8 @@ static float read_value(const AppState *app, int id)
 {
   switch (id)
   {
+  case SID_SOURCE:
+    return (float)app->source_config.kind;
   case SID_SHOW_SPECTRUM:
     return app->visualizer_config.show_spectrum ? 1.0f : 0.0f;
   case SID_SHOW_WAVEFORM:
@@ -169,6 +190,22 @@ static void write_value(AppState *app, int id, float v)
 {
   switch (id)
   {
+  case SID_SOURCE:
+  {
+    // The UI only stages a request; the main loop tears down + restarts
+    // the audio source on the next iteration. Re-selecting FILE without a
+    // path opens the file picker (apply_pending_source_change handles
+    // that branch).
+    const AudioSourceKind new_kind = (AudioSourceKind)(uint32_t)v;
+    const bool need_file_pick =
+        (new_kind == AUDIO_SOURCE_FILE && app->current_file_path[0] == '\0');
+    if (new_kind != app->source_config.kind || need_file_pick)
+    {
+      app->requested_source_kind = new_kind;
+      app->source_change_pending = true;
+    }
+    break;
+  }
   case SID_SHOW_SPECTRUM:
     app->visualizer_config.show_spectrum = (v >= 0.5f);
     break;
@@ -330,7 +367,12 @@ typedef struct Layout
 {
   int modal_x, modal_y, modal_w, modal_h;
   int row_h;
-  int row_y0; // top of first slider row, already shifted by -scroll_offset
+  // Pre-computed top-of-row y for each SliderId, post-scroll. -1 means
+  // the row is hidden (filtered by row_visible) and widget rects must not
+  // be computed for it. Visible rows are packed contiguously: the n-th
+  // visible row sits at viewport_y0 + n * row_h - scroll_offset.
+  int row_top_y[SID_COUNT];
+  int visible_count;
   int label_x;
   int label_w;
   int track_x;
@@ -358,10 +400,22 @@ static int imax(int a, int b)
   return a > b ? a : b;
 }
 
+// Conditional row visibility. BROWSE FILE only shows when the active
+// source is FILE; the error label only when there's a message to show.
+static bool row_visible(const AppState *app, int id)
+{
+  if (id == SID_BROWSE_FILE)
+    return app && app->source_config.kind == AUDIO_SOURCE_FILE;
+  if (id == SID_SOURCE_ERROR)
+    return app && app->ui_error_msg[0] != '\0';
+  return true;
+}
+
 // Builds the per-frame layout from the current window size and persistent
 // controls state. Clamps `c->scroll_offset` to the current valid range so
-// callers can read it back safely.
-static void compute_layout(int win_w, int win_h, Controls *c, Layout *L)
+// callers can read it back safely. `app` is consulted for per-row
+// visibility so hidden rows are excluded from the rows table.
+static void compute_layout(int win_w, int win_h, Controls *c, const AppState *app, Layout *L)
 {
   const int pad = 28;
   const int title_h = 44;
@@ -371,8 +425,16 @@ static void compute_layout(int win_w, int win_h, Controls *c, Layout *L)
   L->text_size_px = UI_TEXT_MEDIUM;
   L->title_size_px = UI_TEXT_TITLE;
 
-  // Natural height needed to show every row without scrolling.
-  const int natural_h = title_h + SID_COUNT * row_h + 2 * pad;
+  // Count visible rows up front so modal sizing reflects what's actually
+  // going to be drawn (the BROWSE FILE / error rows come and go).
+  int visible_count = 0;
+  for (int i = 0; i < SID_COUNT; ++i)
+    if (row_visible(app, i))
+      ++visible_count;
+  L->visible_count = visible_count;
+
+  // Natural height needed to show every visible row without scrolling.
+  const int natural_h = title_h + visible_count * row_h + 2 * pad;
   // Available height: leave a `pad` margin top and bottom, but enforce a
   // minimum that still shows the title plus a couple of rows.
   const int min_modal_h = title_h + 2 * row_h + 2 * pad;
@@ -393,16 +455,29 @@ static void compute_layout(int win_w, int win_h, Controls *c, Layout *L)
   L->viewport_y0 = L->modal_y + pad + title_h;
   L->viewport_y1 = L->modal_y + L->modal_h - pad;
   const int viewport_h = imax(0, L->viewport_y1 - L->viewport_y0);
-  const int content_h = SID_COUNT * row_h;
+  const int content_h = visible_count * row_h;
   L->max_scroll = imax(0, content_h - viewport_h);
 
   if (c)
     c->scroll_offset = clamp_f(c->scroll_offset, 0.0f, (float)L->max_scroll);
   const int scroll = c ? (int)c->scroll_offset : 0;
 
-  // row_y0 is the visual top of the first row, post-scroll. Off-screen
-  // rows are filtered out by hit-testing and clipped at render time.
-  L->row_y0 = L->viewport_y0 - scroll;
+  // Pack visible rows contiguously starting at viewport_y0 - scroll.
+  // Hidden rows get -1 so widget_rect() and friends can refuse to compute
+  // geometry for them.
+  int vis_i = 0;
+  for (int i = 0; i < SID_COUNT; ++i)
+  {
+    if (row_visible(app, i))
+    {
+      L->row_top_y[i] = L->viewport_y0 + vis_i * row_h - scroll;
+      ++vis_i;
+    }
+    else
+    {
+      L->row_top_y[i] = -1;
+    }
+  }
 
   // Scrollbar lives in the right padding so it doesn't eat into the
   // value column. Width fixed; gap to the modal edge is half the pad.
@@ -420,11 +495,21 @@ static void compute_layout(int win_w, int win_h, Controls *c, Layout *L)
 
 // Widget rect for a row. Geometry depends on the kind: continuous sliders
 // use the full track width; checkboxes are a small square; dropdowns are a
-// fixed-width button with the current value inside.
-static void widget_rect(const Layout *L, int slider_index, SDL_FRect *out)
+// fixed-width button; the file-picker button spans the full track area;
+// labels span everything from label_x to the value column for full-width
+// text rendering. Returns false (and a zeroed rect) when the row is hidden
+// or absent — callers should bail out in that case.
+static bool widget_rect(const Layout *L, int slider_index, SDL_FRect *out)
 {
+  out->x = 0.0f;
+  out->y = 0.0f;
+  out->w = 0.0f;
+  out->h = 0.0f;
+  const int top = L->row_top_y[slider_index];
+  if (top < 0)
+    return false;
   const SliderKind k = SLIDERS[slider_index].kind;
-  const int cy = L->row_y0 + slider_index * L->row_h + L->row_h / 2;
+  const int cy = top + L->row_h / 2;
   switch (k)
   {
   case SK_FLOAT:
@@ -439,6 +524,20 @@ static void widget_rect(const Layout *L, int slider_index, SDL_FRect *out)
     out->w = 20.0f;
     out->h = 20.0f;
     break;
+  case SK_BUTTON:
+    // Wide clickable bar spanning the full track + value columns.
+    out->x = (float)L->track_x;
+    out->y = (float)(cy - 11);
+    out->w = (float)(L->value_x + L->value_w - L->track_x);
+    out->h = 22.0f;
+    break;
+  case SK_LABEL:
+    // Spans the entire row so wrapping math has the widest possible band.
+    out->x = (float)L->label_x;
+    out->y = (float)top;
+    out->w = (float)(L->value_x + L->value_w - L->label_x);
+    out->h = (float)L->row_h;
+    break;
   case SK_DROPDOWN_UINT:
   default:
     out->x = (float)L->track_x;
@@ -447,6 +546,7 @@ static void widget_rect(const Layout *L, int slider_index, SDL_FRect *out)
     out->h = 22.0f;
     break;
   }
+  return true;
 }
 
 // Per-option rect for an open dropdown popup. Options stack vertically
@@ -454,8 +554,8 @@ static void widget_rect(const Layout *L, int slider_index, SDL_FRect *out)
 static void dropdown_option_rect(const Layout *L, int slider_index, int option_index,
                                  SDL_FRect *out)
 {
-  SDL_FRect btn;
-  widget_rect(L, slider_index, &btn);
+  SDL_FRect btn = {0};
+  (void)widget_rect(L, slider_index, &btn);
   out->x = btn.x;
   out->y = btn.y + btn.h + (float)option_index * btn.h;
   out->w = btn.w;
@@ -474,7 +574,7 @@ static void scrollbar_thumb_rect(const Layout *L, float scroll_offset, SDL_FRect
   if (L->scrollbar_w <= 0 || L->max_scroll <= 0)
     return;
   const float viewport_h = (float)(L->viewport_y1 - L->viewport_y0);
-  const float content_h = (float)(SID_COUNT * L->row_h);
+  const float content_h = (float)(L->visible_count * L->row_h);
   float thumb_h = viewport_h * (viewport_h / content_h);
   if (thumb_h < 24.0f)
     thumb_h = 24.0f;
@@ -499,15 +599,19 @@ static bool point_in_rect(const SDL_FRect *r, float mx, float my)
 
 // Row index whose widget rect contains (mx, my), or -1. Clicks landing
 // outside the scrollable viewport are rejected so rows scrolled out of
-// sight stay un-clickable.
+// sight stay un-clickable. Label rows are non-interactive even when hit
+// by the cursor.
 static int hit_test_widget(const Layout *L, float mx, float my)
 {
   if (my < (float)L->viewport_y0 || my >= (float)L->viewport_y1)
     return -1;
   for (int i = 0; i < SID_COUNT; ++i)
   {
+    if (SLIDERS[i].kind == SK_LABEL)
+      continue;
     SDL_FRect r;
-    widget_rect(L, i, &r);
+    if (!widget_rect(L, i, &r))
+      continue;
     if (point_in_rect(&r, mx, my))
       return i;
   }
@@ -539,7 +643,8 @@ static bool point_in_modal(const Layout *L, float mx, float my)
 static void set_slider_from_x(AppState *app, const Layout *L, int slider_index, float mx)
 {
   SDL_FRect r;
-  widget_rect(L, slider_index, &r);
+  if (!widget_rect(L, slider_index, &r) || r.w <= 0.0f)
+    return;
   const float t = (mx - r.x) / r.w;
   const float v = pos_to_value(&SLIDERS[slider_index], t);
   write_value(app, slider_index, v);
@@ -601,7 +706,7 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
   }
 
   Layout L;
-  compute_layout(app->window_width, app->window_height, c, &L);
+  compute_layout(app->window_width, app->window_height, c, app, &L);
 
   switch (ev->type)
   {
@@ -677,6 +782,15 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
         }
         case SK_DROPDOWN_UINT:
           c->open_dropdown = hit;
+          break;
+        case SK_BUTTON:
+          // BROWSE FILE… is the only button row today. Defer the actual
+          // SDL_ShowOpenFileDialog call to the main loop so it always
+          // runs on the main thread.
+          if (hit == SID_BROWSE_FILE)
+            app->open_file_picker_request = true;
+          break;
+        case SK_LABEL:
           break;
         }
       }
@@ -794,6 +908,56 @@ static void render_bool_checkbox(SDL_Renderer *ren, const Layout *L, int i, floa
   }
 }
 
+// Returns a pointer into `path` at the trailing path component. Works for
+// both forward and backslash separators so a Windows-style path supplied
+// through the file dialog still renders sensibly.
+static const char *basename_of(const char *path)
+{
+  if (!path || !*path)
+    return "";
+  const char *p = path;
+  const char *last = path;
+  for (; *p; ++p)
+    if (*p == '/' || *p == '\\')
+      last = p + 1;
+  return last;
+}
+
+// Wide pill button (used by BROWSE FILE…). Renders the current filename if
+// one is set, otherwise a "BROWSE…" placeholder.
+static void render_button(SDL_Renderer *ren, const Layout *L, int i, const AppState *app)
+{
+  SDL_FRect btn;
+  if (!widget_rect(L, i, &btn))
+    return;
+
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 60);
+  SDL_RenderFillRect(ren, &btn);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 200);
+  SDL_RenderRect(ren, &btn);
+
+  const char *text = "BROWSE...";
+  if (i == SID_BROWSE_FILE && app->current_file_path[0] != '\0')
+    text = basename_of(app->current_file_path);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  ui_text_draw(ren, text, (int)btn.x + 10, text_y_for_rect(btn.y, btn.h, L->text_size_px),
+               L->text_size_px);
+}
+
+// Read-only red text row used for the source error message. Spans the full
+// row width so longer messages still fit.
+static void render_label(SDL_Renderer *ren, const Layout *L, int i, const AppState *app)
+{
+  SDL_FRect r;
+  if (!widget_rect(L, i, &r))
+    return;
+  const char *text = (i == SID_SOURCE_ERROR) ? app->ui_error_msg : "";
+  if (!text || !*text)
+    return;
+  SDL_SetRenderDrawColor(ren, 255, 90, 90, 255);
+  ui_text_draw(ren, text, (int)r.x, text_y_for_rect(r.y, r.h, L->text_size_px), L->text_size_px);
+}
+
 static void render_dropdown_button(SDL_Renderer *ren, const Layout *L, int i, float v)
 {
   const SliderDef *def = &SLIDERS[i];
@@ -858,7 +1022,7 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
     return;
 
   Layout L;
-  compute_layout(app->window_width, app->window_height, c, &L);
+  compute_layout(app->window_width, app->window_height, c, app, &L);
 
   SDL_BlendMode prev_blend = SDL_BLENDMODE_NONE;
   SDL_GetRenderDrawBlendMode(ren, &prev_blend);
@@ -906,15 +1070,20 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
     const float v = read_value(app, i);
 
     SDL_FRect w;
-    widget_rect(&L, i, &w);
+    if (!widget_rect(&L, i, &w))
+      continue;
     // Skip rows fully outside the viewport.
     if (w.y + w.h < (float)L.viewport_y0 || w.y >= (float)L.viewport_y1)
       continue;
     const int text_y = text_y_for_rect(w.y, w.h, L.text_size_px);
 
-    // Label.
-    SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-    ui_text_draw(ren, def->label, L.label_x, text_y, L.text_size_px);
+    // Left-column label. Empty label rows (e.g. SOURCE_ERROR) skip this so
+    // their full-width text can start at label_x without overlap.
+    if (def->label && def->label[0] && def->kind != SK_LABEL)
+    {
+      SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+      ui_text_draw(ren, def->label, L.label_x, text_y, L.text_size_px);
+    }
 
     switch (def->kind)
     {
@@ -927,11 +1096,17 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
     case SK_DROPDOWN_UINT:
       render_dropdown_button(ren, &L, i, v);
       break;
+    case SK_BUTTON:
+      render_button(ren, &L, i, app);
+      break;
+    case SK_LABEL:
+      render_label(ren, &L, i, app);
+      break;
     }
 
-    // Right-aligned numeric/state readout. Dropdowns already render the
-    // current value inside the button, so don't repeat it here.
-    if (def->kind != SK_DROPDOWN_UINT)
+    // Right-aligned numeric/state readout. Dropdowns render their value
+    // inside the button; buttons/labels have no scalar value to display.
+    if (def->kind == SK_FLOAT || def->kind == SK_BOOL)
     {
       char buf[32];
       format_value(def, v, buf, sizeof(buf));

@@ -43,6 +43,13 @@ typedef struct CliArgs
   const char *file_path;
 } CliArgs;
 
+// SDL user event type used to deliver a file-picker result back to the main
+// thread. SDL_ShowOpenFileDialog's callback may run on a worker thread, so
+// we strdup the chosen path and push it through the event queue instead of
+// touching AppState directly. ev.user.data1 owns the path string (or NULL on
+// cancel) and must be SDL_free()'d by the receiver.
+static Uint32 g_file_picked_event = 0;
+
 static void print_usage(const char *prog)
 {
   fprintf(stderr,
@@ -221,6 +228,120 @@ static void shutdown_sdl(AppState *app)
   SDL_Quit();
 }
 
+// SDL_ShowOpenFileDialog callback. May fire on a worker thread, so we only
+// strdup the path and post it through the event queue.
+static void SDLCALL on_file_picked(void *userdata, const char *const *filelist, int filter)
+{
+  (void)userdata;
+  (void)filter;
+  SDL_Event ev;
+  SDL_zero(ev);
+  ev.type = g_file_picked_event;
+  // filelist == NULL on dialog error; filelist[0] == NULL on user cancel.
+  ev.user.data1 = (filelist && filelist[0]) ? SDL_strdup(filelist[0]) : NULL;
+  SDL_PushEvent(&ev);
+}
+
+static void request_open_file_dialog(AppState *app)
+{
+  if (!app || app->file_picker_open)
+    return;
+  app->file_picker_open = true;
+  // Single audio-files filter; semicolon-separated extensions per SDL3 docs.
+  static const SDL_DialogFileFilter filters[] = {
+      {"Audio files", "wav;mp3;flac;ogg;m4a;aac;aiff;opus"},
+  };
+  SDL_ShowOpenFileDialog(on_file_picked, app, (SDL_Window *)app->sdl_window, filters,
+                         (int)(sizeof(filters) / sizeof(filters[0])), NULL, false);
+}
+
+// Tear down the current source and start one configured per
+// app->requested_source_kind. On failure, populates app->ui_error_msg and
+// falls back to a fresh test-tone source so the app always has audio.
+// Returns false only when even the test-tone fallback fails to start.
+static bool apply_pending_source_change(AppState *app)
+{
+  if (!app->source_change_pending)
+    return true;
+  app->source_change_pending = false;
+
+  const AudioSourceKind new_kind = app->requested_source_kind;
+
+  // The FILE option in the dropdown opens the picker if we have nothing to
+  // play yet; the actual source switch happens once a path is in hand.
+  if (new_kind == AUDIO_SOURCE_FILE && app->current_file_path[0] == '\0')
+  {
+    request_open_file_dialog(app);
+    return true;
+  }
+
+  if (app->source)
+  {
+    audio_source_stop(app->source);
+    audio_source_destroy(app->source);
+    app->source = NULL;
+  }
+
+  AudioSourceConfig new_cfg = app->source_config;
+  new_cfg.kind = new_kind;
+  new_cfg.file_path = (new_kind == AUDIO_SOURCE_FILE) ? app->current_file_path : NULL;
+  new_cfg.ring = &app->ring;
+
+  AudioSource *new_src = audio_source_create(&new_cfg);
+  if (new_src && audio_source_start(new_src))
+  {
+    app->source = new_src;
+    app->source_config = new_cfg;
+    app->ui_error_msg[0] = '\0';
+    const uint32_t actual_rate = audio_source_sample_rate(app->source);
+    if (actual_rate != 0 && actual_rate != app->analyzer_config.sample_rate)
+    {
+      app->analyzer_config.sample_rate = actual_rate;
+      app->analyzer_config_dirty = true;
+    }
+    fprintf(stdout, "audio: switched to %s @ %u Hz\n", audio_source_name(app->source), actual_rate);
+    fflush(stdout);
+    return true;
+  }
+  if (new_src)
+    audio_source_destroy(new_src);
+
+  const char *msg = "Audio source failed to start.";
+  switch (new_kind)
+  {
+  case AUDIO_SOURCE_MIC:
+    msg = "Microphone access denied or unavailable. Enable it in "
+          "System Settings > Privacy & Security > Microphone, then try again.";
+    break;
+  case AUDIO_SOURCE_SYSTEM:
+    msg = "System audio capture failed. Check that a system audio "
+          "device is available and that the app has permission to record it.";
+    break;
+  case AUDIO_SOURCE_FILE:
+    msg = "Could not open the selected audio file.";
+    break;
+  case AUDIO_SOURCE_TEST_TONE:
+    break;
+  }
+  snprintf(app->ui_error_msg, sizeof(app->ui_error_msg), "%s", msg);
+  fprintf(stderr, "audio: %s\n", msg);
+
+  AudioSourceConfig fb = new_cfg;
+  fb.kind = AUDIO_SOURCE_TEST_TONE;
+  fb.file_path = NULL;
+  AudioSource *fb_src = audio_source_create(&fb);
+  if (fb_src && audio_source_start(fb_src))
+  {
+    app->source = fb_src;
+    app->source_config = fb;
+    return true;
+  }
+  if (fb_src)
+    audio_source_destroy(fb_src);
+  fprintf(stderr, "audio: fallback to test tone also failed\n");
+  return false;
+}
+
 static void handle_events(AppState *app)
 {
   SDL_Event ev;
@@ -267,6 +388,24 @@ static void handle_events(AppState *app)
     else if (ev.type == SDL_EVENT_WINDOW_MOUSE_LEAVE)
     {
       app->mouse_in_window = false;
+    }
+    else if (g_file_picked_event != 0 && ev.type == g_file_picked_event)
+    {
+      // Async result from SDL_ShowOpenFileDialog. ev.user.data1 is the
+      // picked path (owned by us, free with SDL_free) or NULL on cancel.
+      app->file_picker_open = false;
+      char *path = (char *)ev.user.data1;
+      if (path && path[0])
+      {
+        snprintf(app->current_file_path, sizeof(app->current_file_path), "%s", path);
+        app->requested_source_kind = AUDIO_SOURCE_FILE;
+        app->source_change_pending = true;
+        app->ui_error_msg[0] = '\0';
+      }
+      // On cancel/error we leave source_config.kind untouched; the SOURCE
+      // dropdown reads from it directly so it just reverts visually.
+      if (path)
+        SDL_free(path);
     }
   }
 }
@@ -574,6 +713,16 @@ int main(int argc, char **argv)
   if (!ui_text_init((SDL_Renderer *)app.sdl_renderer))
     fprintf(stderr, "warn: no system font found; UI text disabled\n");
 
+  // Seed the UI's "currently selected file" from --file so re-opening the
+  // picker remembers the last path, and so apply_pending_source_change can
+  // re-create the FILE source after a runtime switch away and back.
+  if (cli.file_path)
+    snprintf(app.current_file_path, sizeof(app.current_file_path), "%s", cli.file_path);
+
+  // Register the SDL user event used by the file-picker callback to hand
+  // the chosen path back to the main thread.
+  g_file_picked_event = SDL_RegisterEvents(1);
+
   app.source_config = (AudioSourceConfig){
       .kind = cli.kind,
       .file_path = cli.file_path,
@@ -627,6 +776,18 @@ int main(int argc, char **argv)
     {
       app.running = false;
       break;
+    }
+
+    if (!apply_pending_source_change(&app))
+    {
+      app.running = false;
+      break;
+    }
+
+    if (app.open_file_picker_request)
+    {
+      app.open_file_picker_request = false;
+      request_open_file_dialog(&app);
     }
 
     draw_frame(&app);

@@ -64,6 +64,29 @@ typedef struct AppState
   AudioSource *source;
   AudioSourceConfig source_config;
 
+  // Pending source change requested by the UI or by the file picker
+  // callback. The main loop applies it between events and rendering so
+  // teardown never happens mid-frame or off-thread.
+  bool source_change_pending;
+  AudioSourceKind requested_source_kind;
+
+  // Active file path (UTF-8). Populated from --file at startup and from
+  // SDL_ShowOpenFileDialog's callback. Empty when no file has ever been
+  // chosen.
+  char current_file_path[1024];
+
+  // True while a file picker dialog is in flight, to suppress reopening.
+  bool file_picker_open;
+
+  // Set by the UI when the user clicks BROWSE FILE… so the main loop opens
+  // SDL_ShowOpenFileDialog on the main thread. Cleared after the dialog is
+  // requested.
+  bool open_file_picker_request;
+
+  // Last user-visible source error, rendered in the settings modal.
+  // Cleared on the next successful source change.
+  char ui_error_msg[256];
+
   // Analyzer pipeline.
   Analyzer analyzer;
   AnalyzerConfig analyzer_config;
