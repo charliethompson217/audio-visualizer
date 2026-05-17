@@ -7,7 +7,11 @@
     <true/>
 
     <!-- Microphone access + Core Audio process tap (system audio capture). -->
+    <!-- Hardened runtime entitlement: Core Audio / audio input access. -->
     <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- Sandbox entitlement: microphone access in a sandboxed app. -->
+    <key>com.apple.security.device.microphone</key>
     <true/>
 
     <!-- File > Open audio files chosen by the user. -->

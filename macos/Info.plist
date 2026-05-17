@@ -24,6 +24,8 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Audio Visualizer visualizes system audio output as a real-time spectrogram.</string>
     <key>NSMicrophoneUsageDescription</key>

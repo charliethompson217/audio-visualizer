@@ -76,8 +76,16 @@ cmake --build "$BUILD_DIR" --config Release
 echo "   ✅ Build OK"
 echo
 
-# ── Step 2/6 · Sign with Developer ID ────────────────────────────────────────
-echo "── Step 2/6: Code-sign (Developer ID) ──────────────────────────────────"
+# ── Step 2/6 · Strip quarantine attribute ────────────────────────────────────
+echo "── Step 2/6: Strip quarantine attribute ─────────────────────────────────"
+# macOS tags downloaded files with com.apple.quarantine; strip it before signing
+# so the attribute is never present inside the signed bundle.
+xattr -cr "$APP_BUNDLE"
+echo "   ✅ Quarantine attribute removed"
+echo
+
+# ── Step 3/6 · Sign with Developer ID ────────────────────────────────────────
+echo "── Step 3/6: Code-sign (Developer ID) ──────────────────────────────────"
 
 # Sign bundled dylibs first, then the app shell.  Order matters: the outer
 # bundle signature covers nested code, so inner components must be signed first.
@@ -105,8 +113,8 @@ codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 echo "   ✅ Signature OK"
 echo
 
-# ── Step 3/6 · Notarize ───────────────────────────────────────────────────────
-echo "── Step 3/6: Notarize ───────────────────────────────────────────────────"
+# ── Step 4/6 · Notarize ───────────────────────────────────────────────────────
+echo "── Step 4/6: Notarize ───────────────────────────────────────────────────"
 NOTARIZE_ZIP="$BUILD_DIR/${APP_NAME}-${APP_VERSION}-notarize.zip"
 ditto -c -k --keepParent "$APP_BUNDLE" "$NOTARIZE_ZIP"
 xcrun notarytool submit "$NOTARIZE_ZIP" \
