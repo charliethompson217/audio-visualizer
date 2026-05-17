@@ -11,7 +11,29 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-pkg_check_modules(FFTW3F REQUIRED IMPORTED_TARGET fftw3f)
+
+# On macOS we want a self-contained .app with no Homebrew runtime
+# dependencies, so link libfftw3f as a static archive. Linux/Windows
+# builds remain dynamic via pkg-config -- they're build-from-source
+# targets per the roadmap, not distribution artifacts.
+if(APPLE)
+    pkg_get_variable(FFTW3F_LIBDIR fftw3f libdir)
+    pkg_get_variable(FFTW3F_INCDIR fftw3f includedir)
+    set(FFTW3F_STATIC_ARCHIVE "${FFTW3F_LIBDIR}/libfftw3f.a")
+    if(NOT EXISTS "${FFTW3F_STATIC_ARCHIVE}")
+        message(FATAL_ERROR
+            "FFTW3F static archive not found at ${FFTW3F_STATIC_ARCHIVE}. "
+            "On Homebrew this ships with the fftw formula by default; "
+            "try `brew reinstall fftw`.")
+    endif()
+    add_library(fftw3f_static STATIC IMPORTED)
+    set_target_properties(fftw3f_static PROPERTIES
+        IMPORTED_LOCATION "${FFTW3F_STATIC_ARCHIVE}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFTW3F_INCDIR}"
+    )
+else()
+    pkg_check_modules(FFTW3F REQUIRED IMPORTED_TARGET fftw3f)
+endif()
 
 add_executable(audiovisualizer
     src/main.c
@@ -40,9 +62,14 @@ target_include_directories(audiovisualizer PRIVATE
 
 target_link_libraries(audiovisualizer PRIVATE
     PkgConfig::SDL3
-    PkgConfig::FFTW3F
     m
 )
+
+if(APPLE)
+    target_link_libraries(audiovisualizer PRIVATE fftw3f_static)
+else()
+    target_link_libraries(audiovisualizer PRIVATE PkgConfig::FFTW3F)
+endif()
 
 if(NOT APPLE)
     # System-audio source for Linux (PulseAudio monitor) and Windows
@@ -120,6 +147,21 @@ if(APPLE)
     set_target_properties(audiovisualizer PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${AUDIO_VISUALIZER_INFO_PLIST}"
+        # Resolve @rpath/* dylib references against the bundled
+        # Frameworks dir so the .app runs without Homebrew installed.
+        BUILD_RPATH "@executable_path/../Frameworks"
+        INSTALL_RPATH "@executable_path/../Frameworks"
+    )
+
+    # Relocate any non-system dylib (currently just libSDL3.0.dylib --
+    # FFTW3F is statically linked, miniaudio is single-header) into
+    # Contents/Frameworks/ and rewrite the binary's references to
+    # @rpath. Must run before codesign so the bundled copies get a
+    # matching ad-hoc signature.
+    add_custom_command(TARGET audiovisualizer POST_BUILD
+        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos_deps.sh"
+                "$<TARGET_BUNDLE_DIR:audiovisualizer>"
+        VERBATIM
     )
 
     # Ad-hoc sign the whole .app so TCC can match it by a stable identity.
