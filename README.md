@@ -5,6 +5,14 @@ A small native C application that visualizes real-time audio as a log-frequency
 app doesn't care whether samples come from a file, microphone, system output,
 or a generated test tone.
 
+## macOS Download
+
+**[Audio\_Visualizer-0.1-macOS.dmg](https://github.com/charliethompson217/audio-visualizer/releases/download/0.1/Audio_Visualizer-0.1-macOS.dmg)**
+
+Open the `.dmg` and drag **Audio Visualizer** to your Applications folder. The app is signed and notarized with Apple's Developer ID, so macOS will open it without a security warning.
+
+Requires macOS 14.2 or later.
+
 ## Audio sources
 
 | Flag          | Source              | macOS | Linux | Windows |

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox is optional for Developer ID but kept as good practice. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Microphone access + Core Audio process tap (system audio capture). -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- File > Open audio files chosen by the user. -->
+    <key>com.apple.security.files.user-selected.read-only</key>
+    <true/>
+
+    <!--
+        com.apple.security.cs.disable-library-validation is intentionally
+        absent here.  Under a real Developer ID certificate every bundled
+        dylib (e.g. SDL3) is re-signed with the same identity, so the
+        Hardened Runtime's library-validation check passes without disabling
+        it.  The ad-hoc dev build (audiovisualizer.entitlements) still
+        carries it because ad-hoc-signed code has no Team ID to match.
+    -->
+</dict>
+</plist>
