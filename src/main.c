@@ -122,8 +122,16 @@ static bool init_sdl(AppState *app)
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return false;
   }
-  SDL_Window *win = SDL_CreateWindow("audiovisualizer", app->window_width, app->window_height,
-                                     SDL_WINDOW_RESIZABLE);
+  SDL_WindowFlags win_flags = SDL_WINDOW_RESIZABLE;
+#ifdef __APPLE__
+  // Ask Cocoa for a backing store at the display's native pixel density
+  // so UI text can be drawn at native resolution on Retina. Layout and
+  // mouse events stay in logical points; only the renderer's output
+  // surface is high-resolution.
+  win_flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#endif
+  SDL_Window *win =
+      SDL_CreateWindow("audiovisualizer", app->window_width, app->window_height, win_flags);
   if (!win)
   {
     fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -172,6 +180,24 @@ static bool init_sdl(AppState *app)
   // overwrites everything, independent of whatever draw color/blend the
   // UI overlay left behind.
   SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+
+  // On Retina macOS the window's backing store is at the display's native
+  // pixel density (typically 2x logical). Tell the renderer to accept draw
+  // calls in logical points and rasterize them at the physical resolution
+  // — this is what lets the font atlas, baked at scale*size_px, land 1:1
+  // on the physical pixel grid. On 1:1 displays (and on Windows/Linux,
+  // where the HIGH_PIXEL_DENSITY flag isn't set) pixel density is 1.0 and
+  // we leave the renderer in its default coordinate space.
+  float pixel_scale = SDL_GetWindowPixelDensity(win);
+  if (!(pixel_scale > 0.0f))
+    pixel_scale = 1.0f;
+  app->ui_pixel_scale = pixel_scale;
+  if (pixel_scale > 1.0f)
+  {
+    SDL_SetRenderLogicalPresentation(ren, app->window_width, app->window_height,
+                                     SDL_LOGICAL_PRESENTATION_STRETCH);
+  }
+
   app->sdl_window = win;
   app->sdl_renderer = ren;
   app->sdl_texture = tex;
@@ -292,6 +318,26 @@ static bool apply_pending_resize(AppState *app)
   app->window_height = new_window_h;
   app->render_width = new_render_w;
   app->render_height = new_render_h;
+
+  // Re-query pixel density: dragging the window between a Retina laptop
+  // panel and a 1x external monitor changes it. Refresh logical
+  // presentation (logical size follows the new window size) and rebake
+  // font atlases if the scale changed.
+  float scale = SDL_GetWindowPixelDensity((SDL_Window *)app->sdl_window);
+  if (!(scale > 0.0f))
+    scale = 1.0f;
+  if (scale > 1.0f)
+  {
+    SDL_SetRenderLogicalPresentation((SDL_Renderer *)app->sdl_renderer, new_window_w, new_window_h,
+                                     SDL_LOGICAL_PRESENTATION_STRETCH);
+  }
+  else
+  {
+    SDL_SetRenderLogicalPresentation((SDL_Renderer *)app->sdl_renderer, 0, 0,
+                                     SDL_LOGICAL_PRESENTATION_DISABLED);
+  }
+  app->ui_pixel_scale = scale;
+  ui_text_set_pixel_scale(scale);
   return true;
 }
 
@@ -385,6 +431,7 @@ int main(int argc, char **argv)
     return 1;
   }
   controls_init(&app.controls);
+  ui_text_set_pixel_scale(app.ui_pixel_scale);
   if (!ui_text_init((SDL_Renderer *)app.sdl_renderer))
     fprintf(stderr, "warn: no system font found; UI text disabled\n");
 

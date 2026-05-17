@@ -41,6 +41,13 @@ struct SDL_Renderer;
 // draw/measure calls become no-ops when this returns false.
 bool ui_text_init(struct SDL_Renderer *ren);
 
+// Sets the ratio of physical pixels to logical points the UI is drawn
+// at (1.0 outside HiDPI). Atlases are baked at `size_px * scale`
+// physical pixels but rendered at `size_px` logical points, so glyphs
+// land 1:1 on the physical pixel grid. Safe to call before init.
+// Flushes cached atlases if the scale changes.
+void ui_text_set_pixel_scale(float scale);
+
 // Releases atlas textures and the font buffer. Safe to call multiple
 // times; matches a single successful ui_text_init.
 void ui_text_shutdown(void);

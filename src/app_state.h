@@ -51,6 +51,12 @@ typedef struct AppState
   int pending_window_width;
   int pending_window_height;
 
+  // Ratio of physical pixels to logical points for the current window.
+  // 1.0 on standard displays / Windows / Linux; 2.0 on Retina macOS. The
+  // UI keeps all layout in logical points and uses this scale only to
+  // bake font atlases at native resolution.
+  float ui_pixel_scale;
+
   PixelBuffer pixel_buffer;
 
   // Audio pipeline.

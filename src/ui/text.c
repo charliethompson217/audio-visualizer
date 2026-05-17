@@ -64,6 +64,11 @@ static bool g_font_loaded = false;
 static Atlas g_atlases[MAX_ATLASES];
 static int g_atlas_count = 0;
 static uint64_t g_use_counter = 0;
+// Ratio of physical pixels to the logical size_px callers pass in. Atlases
+// are baked at size_px * g_pixel_scale physical pixels so that when their
+// glyph quads are drawn into logical-point dst rects under SDL's logical
+// presentation, the rasterizer lands one atlas pixel per physical pixel.
+static float g_pixel_scale = 1.0f;
 
 // Fast-path: well-known full paths we try in order before falling back to a
 // recursive directory scan. Anything that loads as a TTF/OTF/TTC works; we
@@ -306,6 +311,24 @@ void ui_text_shutdown(void)
   g_font_loaded = false;
 }
 
+void ui_text_set_pixel_scale(float scale)
+{
+  if (scale <= 0.0f)
+    scale = 1.0f;
+  if (scale == g_pixel_scale)
+    return;
+  g_pixel_scale = scale;
+  // Existing atlases were baked at the old scale; drop them so the next
+  // draw rebakes at the new physical size.
+  for (int i = 0; i < g_atlas_count; ++i)
+  {
+    if (g_atlases[i].texture)
+      SDL_DestroyTexture(g_atlases[i].texture);
+  }
+  memset(g_atlases, 0, sizeof(g_atlases));
+  g_atlas_count = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Per-size atlas bake + LRU cache.
 // ---------------------------------------------------------------------------
@@ -315,7 +338,8 @@ static SDL_Texture *bake_atlas_texture(SDL_Renderer *ren, int size_px, stbtt_bak
   unsigned char *bitmap = (unsigned char *)calloc(ATLAS_W * ATLAS_H, 1);
   if (!bitmap)
     return NULL;
-  const int rc = stbtt_BakeFontBitmap(g_font_data, 0, (float)size_px, bitmap, ATLAS_W, ATLAS_H,
+  const float baked_size = (float)size_px * g_pixel_scale;
+  const int rc = stbtt_BakeFontBitmap(g_font_data, 0, baked_size, bitmap, ATLAS_W, ATLAS_H,
                                       GLYPH_FIRST, GLYPH_COUNT, chars_out);
   if (rc == 0)
   {
@@ -452,8 +476,17 @@ void ui_text_draw(SDL_Renderer *ren, const char *s, int x, int y, int size_px)
   SDL_SetTextureColorMod(a->texture, cr, cg, cb);
   SDL_SetTextureAlphaMod(a->texture, ca);
 
-  float fx = (float)x;
-  const float fy = (float)(y + ui_text_ascent(size_px));
+  // The atlas was baked at size_px * g_pixel_scale physical pixels, so its
+  // metrics (xoff/yoff/xadvance encoded in stbtt_bakedchar) are in that
+  // larger coordinate space. Walk the pen there, then divide the resulting
+  // quad geometry back down to logical points for the destination rect.
+  const float scale = g_pixel_scale;
+  const float inv_scale = 1.0f / scale;
+  int asc_phys = 0, desc = 0, lgap = 0;
+  stbtt_GetFontVMetrics(&g_font_info, &asc_phys, &desc, &lgap);
+  const float vscale = stbtt_ScaleForPixelHeight(&g_font_info, (float)size_px * scale);
+  float fx = (float)x * scale;
+  const float fy = (float)y * scale + ceilf((float)asc_phys * vscale);
   for (const char *p = s; *p; ++p)
   {
     unsigned char c = (unsigned char)*p;
@@ -464,7 +497,8 @@ void ui_text_draw(SDL_Renderer *ren, const char *s, int x, int y, int size_px)
     stbtt_GetBakedQuad(a->chars, ATLAS_W, ATLAS_H, c - GLYPH_FIRST, &fx, &pen_y, &q, 1);
     SDL_FRect src = {q.s0 * (float)ATLAS_W, q.t0 * (float)ATLAS_H, (q.s1 - q.s0) * (float)ATLAS_W,
                      (q.t1 - q.t0) * (float)ATLAS_H};
-    SDL_FRect dst = {q.x0, q.y0, q.x1 - q.x0, q.y1 - q.y0};
+    SDL_FRect dst = {q.x0 * inv_scale, q.y0 * inv_scale, (q.x1 - q.x0) * inv_scale,
+                     (q.y1 - q.y0) * inv_scale};
     SDL_RenderTexture(ren, a->texture, &src, &dst);
   }
 }
