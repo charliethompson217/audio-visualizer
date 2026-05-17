@@ -26,7 +26,11 @@
 
 typedef enum AudioSourceKind
 {
-  AUDIO_SOURCE_TEST_TONE = 0,
+  // Bundled public-domain demo recording. Lives at Contents/Resources/
+  // demo-song.mp3 inside the .app on macOS and next to the executable on
+  // Linux/Windows. Value 0 was previously the (now-removed) test tone, so
+  // persisted configs that stored `source.kind=0` migrate to DEMO cleanly.
+  AUDIO_SOURCE_DEMO = 0,
   AUDIO_SOURCE_FILE,
   AUDIO_SOURCE_MIC,
   AUDIO_SOURCE_SYSTEM

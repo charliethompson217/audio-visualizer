@@ -3,7 +3,7 @@
 A small native C application that visualizes real-time audio as a log-frequency
 (musical semitone) bar spectrum and waveform. Audio input is modular: the core
 app doesn't care whether samples come from a file, microphone, system output,
-or a generated test tone.
+or the bundled public-domain demo song.
 
 ## macOS Download
 
@@ -15,12 +15,12 @@ Requires macOS 14.2 or later.
 
 ## Audio sources
 
-| Flag          | Source              | macOS | Linux | Windows |
-| ------------- | ------------------- | :---: | :---: | :-----: |
-| `--test-tone` | Generated sine      |  ✅   |  ✅   |   ✅    |
-| `--file PATH` | Audio file playback |  ✅   |  ✅   |   ✅    |
-| `--mic`       | Microphone capture  |  ✅   |  ✅   |   ✅    |
-| `--system`    | System output mix   |  ✅   |  ✅   |   ✅    |
+| Flag          | Source                  | macOS | Linux | Windows |
+| ------------- | ----------------------- | :---: | :---: | :-----: |
+| `--demo`      | Bundled demo song (MP3) |  ✅   |  ✅   |   ✅    |
+| `--file PATH` | Audio file playback     |  ✅   |  ✅   |   ✅    |
+| `--mic`       | Microphone capture      |  ✅   |  ✅   |   ✅    |
+| `--system`    | System output mix       |  ✅   |  ✅   |   ✅    |
 
 System-audio capture is platform-specific:
 
@@ -151,13 +151,14 @@ prompt you must re-grant access in system settings.
 From the build directory (Linux, or to pass CLI flags on any platform):
 
 ```sh
-./build/audiovisualizer --test-tone
+./build/audiovisualizer --demo
 ./build/audiovisualizer --file path/to/song.wav
 ./build/audiovisualizer --mic
 ./build/audiovisualizer --system
 ```
 
-On macOS you can also just launch the `.app` (defaults to `--system`):
+On macOS you can also just launch the `.app` (first launch defaults to the
+bundled demo song; subsequent launches restore the last-used source):
 
 ```sh
 open build/audiovisualizer.app
@@ -173,6 +174,14 @@ shell with flags.
 - `Tab` — toggle the settings panel (FFT size, dB range, smoothing,
   semitone range, brightness/length power, waveform toggles, etc.)
 - `Esc` — close an open dropdown or the settings panel (does not quit)
+
+## Credits
+
+The bundled demo song (`demo-song.mp3`) is a public-domain recording of
+J. S. Bach's *Prelude No. 1 in C major*, BWV 846 (from the Well-Tempered
+Clavier, Book 1), performed by **Kimiko Ishizaka**. The recording is
+released under the **CC Public Domain Mark 1.0 Universal** and was
+obtained from <https://www.classicals.de/bach-well-tempered-clavier-1>.
 
 ## License
 

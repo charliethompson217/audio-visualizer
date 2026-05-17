@@ -23,7 +23,7 @@
 
 // Implementation-private initializers. Each lives in its source file and
 // installs `vtable` and `impl` into the supplied AudioSource shell.
-bool audio_source_init_test_tone(AudioSource *src, const AudioSourceConfig *config);
+bool audio_source_init_demo(AudioSource *src, const AudioSourceConfig *config);
 bool audio_source_init_file_miniaudio(AudioSource *src, const AudioSourceConfig *config);
 bool audio_source_init_mic_miniaudio(AudioSource *src, const AudioSourceConfig *config);
 #ifdef __APPLE__
@@ -44,8 +44,8 @@ AudioSource *audio_source_create(const AudioSourceConfig *config)
   bool ok = false;
   switch (config->kind)
   {
-  case AUDIO_SOURCE_TEST_TONE:
-    ok = audio_source_init_test_tone(src, config);
+  case AUDIO_SOURCE_DEMO:
+    ok = audio_source_init_demo(src, config);
     break;
   case AUDIO_SOURCE_FILE:
     ok = audio_source_init_file_miniaudio(src, config);

@@ -35,8 +35,9 @@
 #include "ui/overlay.h"
 #include "ui/text.h"
 
-// Phase 4: SDL window + audio source (test-tone or file via miniaudio) +
-// ring buffer + FFTW analyzer + log-semitone bar renderer.
+// Phase 4: SDL window + audio source (bundled demo song, file via
+// miniaudio, microphone, or system loopback) + ring buffer + FFTW
+// analyzer + log-semitone bar renderer.
 
 typedef struct CliArgs
 {
@@ -58,22 +59,22 @@ static Uint32 g_file_picked_event = 0;
 static void print_usage(const char *prog)
 {
   fprintf(stderr,
-          "usage: %s [--test-tone | --file PATH | --mic | --system]\n"
-          "  default: --system\n",
+          "usage: %s [--demo | --file PATH | --mic | --system]\n"
+          "  default on first launch: --demo (bundled public-domain song)\n",
           prog);
 }
 
 static bool parse_cli(int argc, char **argv, CliArgs *out)
 {
   out->kind_set = false;
-  out->kind = AUDIO_SOURCE_SYSTEM;
+  out->kind = AUDIO_SOURCE_DEMO;
   out->file_path = NULL;
   for (int i = 1; i < argc; ++i)
   {
     const char *a = argv[i];
-    if (strcmp(a, "--test-tone") == 0)
+    if (strcmp(a, "--demo") == 0)
     {
-      out->kind = AUDIO_SOURCE_TEST_TONE;
+      out->kind = AUDIO_SOURCE_DEMO;
       out->kind_set = true;
     }
     else if (strcmp(a, "--file") == 0)
@@ -267,8 +268,9 @@ static void request_open_file_dialog(AppState *app)
 
 // Tear down the current source and start one configured per
 // app->requested_source_kind. On failure, populates app->ui_error_msg and
-// falls back to a fresh test-tone source so the app always has audio.
-// Returns false only when even the test-tone fallback fails to start.
+// leaves the app without an active source — the user can pick another
+// option from the SOURCE dropdown. Returns true unconditionally; the
+// callers treat any source error as a recoverable UI condition.
 static bool apply_pending_source_change(AppState *app)
 {
   if (!app->source_change_pending)
@@ -328,28 +330,22 @@ static bool apply_pending_source_change(AppState *app)
           "device is available and that the app has permission to record it.";
     break;
   case AUDIO_SOURCE_FILE:
-    msg = "Could not open the selected audio file.";
+    msg = "Could not open the selected audio file. Pick another file from the SOURCE dropdown.";
+    // Clear the stale path so reselecting FILE from the dropdown opens
+    // the picker again (write_value gates the picker on an empty path,
+    // and a same-kind reselection is otherwise a no-op).
+    app->current_file_path[0] = '\0';
     break;
-  case AUDIO_SOURCE_TEST_TONE:
+  case AUDIO_SOURCE_DEMO:
+    msg = "Could not load the bundled demo song.";
     break;
   }
   snprintf(app->ui_error_msg, sizeof(app->ui_error_msg), "%s", msg);
   fprintf(stderr, "audio: %s\n", msg);
-
-  AudioSourceConfig fb = new_cfg;
-  fb.kind = AUDIO_SOURCE_TEST_TONE;
-  fb.file_path = NULL;
-  AudioSource *fb_src = audio_source_create(&fb);
-  if (fb_src && audio_source_start(fb_src))
-  {
-    app->source = fb_src;
-    app->source_config = fb;
-    return true;
-  }
-  if (fb_src)
-    audio_source_destroy(fb_src);
-  fprintf(stderr, "audio: fallback to test tone also failed\n");
-  return false;
+  // Leave the app with no active source; the user can pick another option
+  // from the SOURCE dropdown. The settings modal surfaces ui_error_msg so
+  // the failure isn't silent.
+  return true;
 }
 
 static void handle_events(AppState *app)
@@ -673,7 +669,11 @@ int main(int argc, char **argv)
       .smoothing = DEFAULT_SMOOTHING,
       .window_function = WINDOW_HANN,
   };
-  app.source_config.kind = AUDIO_SOURCE_SYSTEM;
+  // First-launch default: the bundled public-domain demo song. config_load
+  // overrides this on subsequent launches with whatever the user last had
+  // selected. The demo source doesn't auto-start when the hint banner is
+  // visible — the user clicks PLAY DEMO SONG in the hint to begin.
+  app.source_config.kind = AUDIO_SOURCE_DEMO;
 
   // Default the hint to visible. config_load() will overwrite this to false
   // if the user previously checked "Don't show again". The default must be
@@ -686,18 +686,22 @@ int main(int argc, char **argv)
   // no-op — the app boots with built-in defaults on first launch.
   config_load(&app);
 
+  // FILE is never restored across restarts: a renamed/moved/deleted file
+  // would lock the app in an error state with no in-UI recovery (the
+  // dropdown ignores reselecting the current kind). Force DEMO and wipe
+  // the remembered path so each launch starts with a known-good source
+  // and a clean file picker. Old settings.conf files from prior versions
+  // are migrated here; config_save no longer writes either field.
+  if (app.source_config.kind == AUDIO_SOURCE_FILE)
+    app.source_config.kind = AUDIO_SOURCE_DEMO;
+  app.current_file_path[0] = '\0';
+
   // CLI flags are initial-source overrides only (see handover.md). Without
   // an explicit flag we keep whatever config_load restored.
   if (cli.kind_set)
     app.source_config.kind = cli.kind;
   if (cli.file_path)
     snprintf(app.current_file_path, sizeof(app.current_file_path), "%s", cli.file_path);
-
-  // Restoring FILE without a remembered path would open the picker before
-  // the window is even up. Fall back to SYSTEM so the app always boots
-  // into a working source; the user can pick FILE from the GUI later.
-  if (app.source_config.kind == AUDIO_SOURCE_FILE && app.current_file_path[0] == '\0')
-    app.source_config.kind = AUDIO_SOURCE_SYSTEM;
 
   app.render_width = app.window_width * RENDER_SCALE;
   app.render_height = app.window_height * RENDER_SCALE;
@@ -762,29 +766,28 @@ int main(int argc, char **argv)
   app.source_config.channels = 1;
   app.source_config.ring = &app.ring;
 
+  // On first launch the hint banner is up and the default source is the
+  // bundled demo. Don't auto-start audio in that case — we create the
+  // source so it's ready to go, but wait for the user to click PLAY DEMO
+  // SONG (which sets app.start_audio_request) before calling start.
+  const bool defer_initial_start =
+      (app.source_config.kind == AUDIO_SOURCE_DEMO) && app.controls.show_hint;
+
   app.source = audio_source_create(&app.source_config);
-  if (!app.source || !audio_source_start(app.source))
+  if (!app.source || (!defer_initial_start && !audio_source_start(app.source)))
   {
-    // A persisted source (e.g. mic with revoked permission, file that's
-    // been deleted) shouldn't brick startup. Drop down to test tone and
-    // surface the failure in the modal once it's opened.
+    // A persisted source (mic with revoked permission, file deleted, etc.)
+    // shouldn't brick startup. Tear it down and leave the app sourceless;
+    // the user picks another option from the SOURCE dropdown.
     if (app.source)
     {
       audio_source_destroy(app.source);
       app.source = NULL;
     }
-    fprintf(stderr, "audio: initial source failed; falling back to test tone\n");
+    fprintf(stderr, "audio: initial source failed; no audio active\n");
     snprintf(app.ui_error_msg, sizeof(app.ui_error_msg),
-             "Saved audio source failed to start. Falling back to test tone.");
-    app.source_config.kind = AUDIO_SOURCE_TEST_TONE;
-    app.source_config.file_path = NULL;
-    app.source = audio_source_create(&app.source_config);
-    if (!app.source || !audio_source_start(app.source))
-    {
-      fprintf(stderr, "audio: test-tone fallback also failed\n");
-      cleanup(&app);
-      return 1;
-    }
+             "Saved audio source failed to start. Open Settings (Tab) "
+             "and pick another source.");
   }
 
   // The system audio tap (and potentially other backends) negotiate their
@@ -792,25 +795,29 @@ int main(int argc, char **argv)
   // rate. Realign the analyzer to whatever the source actually produces so
   // bin->frequency mapping (and therefore semitone X positions) stay
   // correct.
-  const uint32_t actual_rate = audio_source_sample_rate(app.source);
-  if (actual_rate != 0 && actual_rate != app.analyzer_config.sample_rate)
+  if (app.source)
   {
-    app.analyzer_config.sample_rate = actual_rate;
-    if (!analyzer_reconfigure(&app.analyzer, &app.analyzer_config))
+    const uint32_t actual_rate = audio_source_sample_rate(app.source);
+    if (actual_rate != 0 && actual_rate != app.analyzer_config.sample_rate)
     {
-      fprintf(stderr, "analyzer_reconfigure(sample_rate=%u) failed\n", actual_rate);
-      cleanup(&app);
-      return 1;
+      app.analyzer_config.sample_rate = actual_rate;
+      if (!analyzer_reconfigure(&app.analyzer, &app.analyzer_config))
+      {
+        fprintf(stderr, "analyzer_reconfigure(sample_rate=%u) failed\n", actual_rate);
+        cleanup(&app);
+        return 1;
+      }
     }
-  }
 
-  fprintf(stdout, "audio: %s @ %u Hz, %u ch | fft=%u (%.1f Hz/bin, %.1f ms window) | %s\n",
-          audio_source_name(app.source), audio_source_sample_rate(app.source),
-          audio_source_channels(app.source), app.analyzer_config.fft_size,
-          (double)app.analyzer_config.sample_rate / (double)app.analyzer_config.fft_size,
-          1000.0 * (double)app.analyzer_config.fft_size / (double)app.analyzer_config.sample_rate,
-          window_fn_name(app.analyzer_config.window_function));
-  fflush(stdout);
+    fprintf(stdout, "audio: %s @ %u Hz, %u ch | fft=%u (%.1f Hz/bin, %.1f ms window) | %s%s\n",
+            audio_source_name(app.source), audio_source_sample_rate(app.source),
+            audio_source_channels(app.source), app.analyzer_config.fft_size,
+            (double)app.analyzer_config.sample_rate / (double)app.analyzer_config.fft_size,
+            1000.0 * (double)app.analyzer_config.fft_size / (double)app.analyzer_config.sample_rate,
+            window_fn_name(app.analyzer_config.window_function),
+            defer_initial_start ? " (waiting for PLAY DEMO SONG)" : "");
+    fflush(stdout);
+  }
 
   // Register the resize watcher only after every subsystem the frame
   // touches (analyzer, renderer, audio source) is initialized — the
@@ -837,6 +844,20 @@ int main(int argc, char **argv)
     {
       app.open_file_picker_request = false;
       request_open_file_dialog(&app);
+    }
+
+    if (app.start_audio_request)
+    {
+      app.start_audio_request = false;
+      if (app.source && !audio_source_is_running(app.source))
+      {
+        if (!audio_source_start(app.source))
+        {
+          fprintf(stderr, "audio: start failed for deferred source\n");
+          snprintf(app.ui_error_msg, sizeof(app.ui_error_msg),
+                   "Could not start the bundled demo song.");
+        }
+      }
     }
 
     draw_frame(&app);

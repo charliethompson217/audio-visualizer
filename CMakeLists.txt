@@ -47,7 +47,7 @@ add_executable(audiovisualizer
     src/platform/paths.c
     src/audio/pcm_ring.c
     src/audio/audio_source.c
-    src/audio/source_test_tone.c
+    src/audio/source_demo.c
     src/audio/source_file_miniaudio.c
     src/audio/source_mic_miniaudio.c
     src/audio/miniaudio_impl.c
@@ -150,6 +150,16 @@ if(APPLE)
         GENERATED TRUE
     )
 
+    # Bundle the public-domain demo song into Contents/Resources/ so the
+    # demo source can locate it via SDL_GetBasePath(). See LICENSES/ for
+    # the CC Public Domain Mark attribution.
+    set(AUDIO_VISUALIZER_DEMO_SONG "${CMAKE_CURRENT_SOURCE_DIR}/demo-song.mp3")
+    target_sources(audiovisualizer PRIVATE "${AUDIO_VISUALIZER_DEMO_SONG}")
+    set_source_files_properties("${AUDIO_VISUALIZER_DEMO_SONG}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+        HEADER_FILE_ONLY TRUE
+    )
+
     set_target_properties(audiovisualizer PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${AUDIO_VISUALIZER_INFO_PLIST}"
@@ -227,6 +237,18 @@ if(WIN32)
 
     # Embed the application icon (used by Explorer, taskbar, Start Menu).
     target_sources(audiovisualizer PRIVATE windows/app.rc)
+endif()
+
+if(NOT APPLE)
+    # Linux/Windows: drop the demo song next to the executable so
+    # SDL_GetBasePath() (which returns the exe directory on these
+    # platforms) resolves the demo source's path correctly.
+    add_custom_command(TARGET audiovisualizer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo-song.mp3"
+                "$<TARGET_FILE_DIR:audiovisualizer>/demo-song.mp3"
+        VERBATIM
+    )
 endif()
 
 target_compile_options(audiovisualizer PRIVATE

@@ -83,6 +83,12 @@ typedef struct AppState
   // requested.
   bool open_file_picker_request;
 
+  // Set by the UI when the user clicks PLAY DEMO SONG on the first-launch
+  // hint banner. The main loop calls audio_source_start() on the existing
+  // (deferred) demo source the next time it ticks. Cleared after the
+  // request is serviced.
+  bool start_audio_request;
+
   // Last user-visible source error, rendered in the settings modal.
   // Cleared on the next successful source change.
   char ui_error_msg[256];

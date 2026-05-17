@@ -286,8 +286,13 @@ bool config_save(const AppState *app)
 
   fprintf(f, "version=%d\n", CONFIG_VERSION);
   fprintf(f, "ui.show_hint=%d\n", app->controls.show_hint ? 1 : 0);
-  fprintf(f, "source.kind=%u\n", (unsigned)app->source_config.kind);
-  fprintf(f, "source.file_path=%s\n", app->current_file_path);
+  // FILE is intentionally not persisted: a renamed/moved file would lock
+  // the app in an error state on the next launch with no in-UI recovery
+  // path. Coerce FILE to DEMO and skip writing the path so every launch
+  // starts with a known-good source and a clean file-picker slate.
+  const AudioSourceKind persisted_kind =
+      (app->source_config.kind == AUDIO_SOURCE_FILE) ? AUDIO_SOURCE_DEMO : app->source_config.kind;
+  fprintf(f, "source.kind=%u\n", (unsigned)persisted_kind);
   fprintf(f, "window.width=%d\n", app->window_width);
   fprintf(f, "window.height=%d\n", app->window_height);
   fprintf(f, "visualizer.brightness_power=%.4f\n", (double)vc->brightness_power);

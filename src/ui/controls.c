@@ -111,9 +111,9 @@ static const uint32_t WINDOW_FN_VALUES[] = {WINDOW_RECTANGULAR, WINDOW_HANN, WIN
                                             WINDOW_BLACKMAN};
 static const char *WINDOW_FN_LABELS[] = {"RECTANGULAR", "HANN", "HAMMING", "BLACKMAN"};
 
-static const uint32_t SOURCE_KINDS[] = {AUDIO_SOURCE_TEST_TONE, AUDIO_SOURCE_FILE, AUDIO_SOURCE_MIC,
+static const uint32_t SOURCE_KINDS[] = {AUDIO_SOURCE_DEMO, AUDIO_SOURCE_FILE, AUDIO_SOURCE_MIC,
                                         AUDIO_SOURCE_SYSTEM};
-static const char *SOURCE_LABELS[] = {"TEST TONE", "FILE", "MIC", "SYSTEM"};
+static const char *SOURCE_LABELS[] = {"DEMO SONG", "FILE", "MIC", "SYSTEM"};
 
 static const SliderDef SLIDERS[SID_COUNT] = {
     [SID_SOURCE] = {"SOURCE", SK_DROPDOWN_UINT, 0.0f, 0.0f, SOURCE_KINDS,
@@ -708,26 +708,51 @@ void controls_toggle(Controls *c)
 // both the event handler and the renderer share identical rects.
 // ---------------------------------------------------------------------------
 
-// Floating panel anchored to the bottom-centre of the window.
-static SDL_FRect hint_panel_rect(int win_w, int win_h)
+// True when the hint banner should expose a "PLAY DEMO SONG" button: the
+// current source is the bundled demo and it isn't currently producing
+// audio. Other sources (mic/system) auto-start without a prompt, so the
+// button is irrelevant for them.
+static bool hint_show_play(const AppState *app)
+{
+  if (!app || app->source_config.kind != AUDIO_SOURCE_DEMO)
+    return false;
+  if (!app->source)
+    return true;
+  return !audio_source_is_running(app->source);
+}
+
+// Floating panel anchored to the bottom-centre of the window. Grows
+// taller when the PLAY DEMO SONG button is visible so the play button
+// has its own row above the existing hint text.
+static SDL_FRect hint_panel_rect(int win_w, int win_h, bool show_play)
 {
   const float pw = 370.0f;
-  const float ph = 76.0f;
+  const float ph = show_play ? 130.0f : 76.0f;
   return (SDL_FRect){((float)win_w - pw) * 0.5f, (float)win_h - ph - 24.0f, pw, ph};
 }
 
 // × dismiss button — top-right corner of the hint panel.
-static SDL_FRect hint_dismiss_rect(int win_w, int win_h)
+static SDL_FRect hint_dismiss_rect(int win_w, int win_h, bool show_play)
 {
-  SDL_FRect p = hint_panel_rect(win_w, win_h);
+  SDL_FRect p = hint_panel_rect(win_w, win_h, show_play);
   return (SDL_FRect){p.x + p.w - 30.0f, p.y + 8.0f, 22.0f, 22.0f};
 }
 
 // "Don't show again" checkbox — bottom-left of the hint panel.
-static SDL_FRect hint_checkbox_rect(int win_w, int win_h)
+static SDL_FRect hint_checkbox_rect(int win_w, int win_h, bool show_play)
 {
-  SDL_FRect p = hint_panel_rect(win_w, win_h);
+  SDL_FRect p = hint_panel_rect(win_w, win_h, show_play);
   return (SDL_FRect){p.x + 14.0f, p.y + p.h - 26.0f, 14.0f, 14.0f};
+}
+
+// PLAY DEMO SONG button — centered horizontally near the top of the
+// expanded hint panel. Only valid when hint_show_play() is true.
+static SDL_FRect hint_play_rect(int win_w, int win_h)
+{
+  SDL_FRect p = hint_panel_rect(win_w, win_h, true);
+  const float bw = 220.0f;
+  const float bh = 34.0f;
+  return (SDL_FRect){p.x + (p.w - bw) * 0.5f, p.y + 14.0f, bw, bh};
 }
 
 // About panel "< BACK" button — left side of the modal title bar.
@@ -812,9 +837,30 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
   {
     const float mx = ev->button.x;
     const float my = ev->button.y;
+    const bool show_play = hint_show_play(app);
+
+    // PLAY DEMO SONG button — only present when the demo source is loaded
+    // but not yet playing. Asks the main loop to start the deferred
+    // source; if the source failed to create at boot, request a fresh
+    // source change instead so it gets recreated cleanly.
+    if (show_play)
+    {
+      SDL_FRect play_r = hint_play_rect(app->window_width, app->window_height);
+      if (point_in_rect(&play_r, mx, my))
+      {
+        if (app->source)
+          app->start_audio_request = true;
+        else
+        {
+          app->requested_source_kind = AUDIO_SOURCE_DEMO;
+          app->source_change_pending = true;
+        }
+        return true;
+      }
+    }
 
     // × dismiss button.
-    SDL_FRect dismiss_r = hint_dismiss_rect(app->window_width, app->window_height);
+    SDL_FRect dismiss_r = hint_dismiss_rect(app->window_width, app->window_height, show_play);
     if (point_in_rect(&dismiss_r, mx, my))
     {
       c->show_hint = false;
@@ -824,7 +870,7 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
     }
 
     // "Don't show again" checkbox.
-    SDL_FRect check_r = hint_checkbox_rect(app->window_width, app->window_height);
+    SDL_FRect check_r = hint_checkbox_rect(app->window_width, app->window_height, show_play);
     if (point_in_rect(&check_r, mx, my))
     {
       c->hint_dont_show_again = !c->hint_dont_show_again;
@@ -832,7 +878,7 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
     }
 
     // Clicks anywhere inside the panel are consumed (don't fall through).
-    SDL_FRect panel_r = hint_panel_rect(app->window_width, app->window_height);
+    SDL_FRect panel_r = hint_panel_rect(app->window_width, app->window_height, show_play);
     if (point_in_rect(&panel_r, mx, my))
       return true;
   }
@@ -1212,8 +1258,9 @@ static void render_hint(const Controls *c, SDL_Renderer *ren, const AppState *ap
 {
   const int ww = app->window_width;
   const int wh = app->window_height;
-  SDL_FRect panel = hint_panel_rect(ww, wh);
-  SDL_FRect dismiss = hint_dismiss_rect(ww, wh);
+  const bool show_play = hint_show_play(app);
+  SDL_FRect panel = hint_panel_rect(ww, wh, show_play);
+  SDL_FRect dismiss = hint_dismiss_rect(ww, wh, show_play);
 
   // Checkbox rect computed inline (avoids the helper calling order issue).
   SDL_FRect checkbox = {panel.x + 14.0f, panel.y + panel.h - 26.0f, 14.0f, 14.0f};
@@ -1224,12 +1271,29 @@ static void render_hint(const Controls *c, SDL_Renderer *ren, const AppState *ap
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 70);
   SDL_RenderRect(ren, &panel);
 
-  // Main hint text, centred horizontally in the top portion of the panel.
+  // PLAY DEMO SONG button — only when the demo source is loaded and
+  // silent. Pushes the hint text down a row so both fit cleanly.
+  if (show_play)
+  {
+    SDL_FRect play = hint_play_rect(ww, wh);
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, 220);
+    SDL_RenderFillRect(ren, &play);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+    SDL_RenderRect(ren, &play);
+    const char *play_label = "> PLAY DEMO SONG";
+    const int pw = ui_text_width(play_label, UI_TEXT_MEDIUM);
+    const int plh = ui_text_line_height(UI_TEXT_MEDIUM);
+    ui_text_draw(ren, play_label, (int)play.x + ((int)play.w - pw) / 2,
+                 (int)play.y + ((int)play.h - plh) / 2, UI_TEXT_MEDIUM);
+  }
+
+  // Main hint text, centred horizontally below the play button (or at the
+  // top of the panel when the play button is absent).
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 230);
   const char *hint_text = "PRESS TAB TO OPEN SETTINGS";
   const int tw = ui_text_width(hint_text, UI_TEXT_MEDIUM);
   const int tx = (int)panel.x + ((int)panel.w - tw) / 2;
-  const int ty = (int)panel.y + 12;
+  const int ty = (int)panel.y + (show_play ? 64 : 12);
   ui_text_draw(ren, hint_text, tx, ty, UI_TEXT_MEDIUM);
 
   // × dismiss button.
@@ -1361,6 +1425,28 @@ static void render_about(SDL_Renderer *ren, const Layout *L)
     ui_text_draw(ren, k_about_libs[i].url, x, y, UI_TEXT_SMALL);
     SDL_RenderLine(ren, (float)x, (float)(y + lh_s - 2), (float)(x + lw), (float)(y + lh_s - 2));
     y += lh_s + 4;
+  }
+
+  // Demo song attribution. The bundled "demo-song.mp3" is a public-domain
+  // recording — credit the performer and license per CC Public Domain
+  // Mark 1.0 best practice.
+  y += 14;
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  ui_text_draw(ren, "DEMO SONG", x, y, UI_TEXT_MEDIUM);
+  y += lh_m + 4;
+
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 170);
+  static const char *const demo_credit[] = {
+      "J. S. Bach - Prelude No. 1 in C major,",
+      "BWV 846 (Well-Tempered Clavier, Book 1).",
+      "Performed by Kimiko Ishizaka.",
+      "License: CC Public Domain Mark 1.0 Universal.",
+  };
+  const int dn = (int)(sizeof(demo_credit) / sizeof(demo_credit[0]));
+  for (int i = 0; i < dn; ++i)
+  {
+    ui_text_draw(ren, demo_credit[i], x, y, UI_TEXT_SMALL);
+    y += lh_s;
   }
 }
 
