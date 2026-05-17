@@ -675,6 +675,13 @@ int main(int argc, char **argv)
   };
   app.source_config.kind = AUDIO_SOURCE_SYSTEM;
 
+  // Default the hint to visible. config_load() will overwrite this to false
+  // if the user previously checked "Don't show again". The default must be
+  // set before config_load so the persisted value isn't clobbered by the
+  // controls_init() call that follows (which intentionally leaves show_hint
+  // untouched so the persisted value survives).
+  app.controls.show_hint = true;
+
   // Layer persisted settings on top of defaults. Missing config file is a
   // no-op — the app boots with built-in defaults on first launch.
   config_load(&app);

@@ -115,6 +115,13 @@ static void apply_kv(AppState *app, const char *key, const char *val)
 {
   if (strcmp(key, "version") == 0)
     return; // schema marker; ignored at load time
+  if (strcmp(key, "ui.show_hint") == 0)
+  {
+    bool v;
+    if (parse_bool(val, &v))
+      app->controls.show_hint = v;
+    return;
+  }
   if (strcmp(key, "source.kind") == 0)
   {
     uint32_t v;
@@ -142,31 +149,87 @@ static void apply_kv(AppState *app, const char *key, const char *val)
     return;
   }
   VisualizerConfig *vc = &app->visualizer_config;
-  if (strcmp(key, "visualizer.brightness_power") == 0) { parse_float(val, &vc->brightness_power); return; }
-  if (strcmp(key, "visualizer.length_power") == 0)     { parse_float(val, &vc->length_power); return; }
-  if (strcmp(key, "visualizer.min_semitone") == 0)     { parse_float(val, &vc->min_semitone); return; }
-  if (strcmp(key, "visualizer.max_semitone") == 0)     { parse_float(val, &vc->max_semitone); return; }
-  if (strcmp(key, "visualizer.show_labels") == 0)      { parse_bool(val, &vc->show_labels); return; }
-  if (strcmp(key, "visualizer.show_cursor") == 0)      { parse_bool(val, &vc->show_cursor); return; }
-  if (strcmp(key, "visualizer.show_spectrum") == 0)    { parse_bool(val, &vc->show_spectrum); return; }
-  if (strcmp(key, "visualizer.show_waveform") == 0)    { parse_bool(val, &vc->show_waveform); return; }
-  if (strcmp(key, "visualizer.waveform_gain") == 0)    { parse_float(val, &vc->waveform_gain); return; }
+  if (strcmp(key, "visualizer.brightness_power") == 0)
+  {
+    parse_float(val, &vc->brightness_power);
+    return;
+  }
+  if (strcmp(key, "visualizer.length_power") == 0)
+  {
+    parse_float(val, &vc->length_power);
+    return;
+  }
+  if (strcmp(key, "visualizer.min_semitone") == 0)
+  {
+    parse_float(val, &vc->min_semitone);
+    return;
+  }
+  if (strcmp(key, "visualizer.max_semitone") == 0)
+  {
+    parse_float(val, &vc->max_semitone);
+    return;
+  }
+  if (strcmp(key, "visualizer.show_labels") == 0)
+  {
+    parse_bool(val, &vc->show_labels);
+    return;
+  }
+  if (strcmp(key, "visualizer.show_cursor") == 0)
+  {
+    parse_bool(val, &vc->show_cursor);
+    return;
+  }
+  if (strcmp(key, "visualizer.show_spectrum") == 0)
+  {
+    parse_bool(val, &vc->show_spectrum);
+    return;
+  }
+  if (strcmp(key, "visualizer.show_waveform") == 0)
+  {
+    parse_bool(val, &vc->show_waveform);
+    return;
+  }
+  if (strcmp(key, "visualizer.waveform_gain") == 0)
+  {
+    parse_float(val, &vc->waveform_gain);
+    return;
+  }
   if (strcmp(key, "visualizer.waveform_samples_per_px") == 0)
   {
     parse_float(val, &vc->waveform_samples_per_px);
     return;
   }
-  if (strcmp(key, "visualizer.f0") == 0)               { parse_float(val, &vc->f0); return; }
+  if (strcmp(key, "visualizer.f0") == 0)
+  {
+    parse_float(val, &vc->f0);
+    return;
+  }
   if (strcmp(key, "visualizer.note_hues") == 0)
   {
     parse_float_list(val, vc->note_hues, 12);
     return;
   }
   AnalyzerConfig *ac = &app->analyzer_config;
-  if (strcmp(key, "analyzer.fft_size") == 0)        { parse_uint(val, &ac->fft_size); return; }
-  if (strcmp(key, "analyzer.min_db") == 0)          { parse_float(val, &ac->min_db); return; }
-  if (strcmp(key, "analyzer.max_db") == 0)          { parse_float(val, &ac->max_db); return; }
-  if (strcmp(key, "analyzer.smoothing") == 0)       { parse_float(val, &ac->smoothing); return; }
+  if (strcmp(key, "analyzer.fft_size") == 0)
+  {
+    parse_uint(val, &ac->fft_size);
+    return;
+  }
+  if (strcmp(key, "analyzer.min_db") == 0)
+  {
+    parse_float(val, &ac->min_db);
+    return;
+  }
+  if (strcmp(key, "analyzer.max_db") == 0)
+  {
+    parse_float(val, &ac->max_db);
+    return;
+  }
+  if (strcmp(key, "analyzer.smoothing") == 0)
+  {
+    parse_float(val, &ac->smoothing);
+    return;
+  }
   if (strcmp(key, "analyzer.window_function") == 0)
   {
     uint32_t v;
@@ -222,6 +285,7 @@ bool config_save(const AppState *app)
   const AnalyzerConfig *ac = &app->analyzer_config;
 
   fprintf(f, "version=%d\n", CONFIG_VERSION);
+  fprintf(f, "ui.show_hint=%d\n", app->controls.show_hint ? 1 : 0);
   fprintf(f, "source.kind=%u\n", (unsigned)app->source_config.kind);
   fprintf(f, "source.file_path=%s\n", app->current_file_path);
   fprintf(f, "window.width=%d\n", app->window_width);

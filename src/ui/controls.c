@@ -28,6 +28,18 @@
 #include "app_state.h"
 #include "text.h"
 #include "../analyzer/window_fn.h"
+#include "../config.h"
+
+// Version shown in the About panel. Keep in sync with Info.plist
+// CFBundleShortVersionString.
+#define APP_VERSION_STRING "0.1"
+#define APP_GITHUB_URL "https://github.com/charliethompson217/audio-visualizer"
+
+// Third-party library homepages shown in the About panel.
+#define LIB_SDL3_URL "https://github.com/libsdl-org/SDL"
+#define LIB_FFTW3_URL "https://www.fftw.org"
+#define LIB_MINIAUDIO_URL "https://miniaud.io"
+#define LIB_STB_TT_URL "https://github.com/nothings/stb"
 
 // ---------------------------------------------------------------------------
 // Slider table. Each entry binds a label to a field in AppState. Discrete
@@ -57,6 +69,7 @@ typedef enum SliderId
   SID_MIN_DB,
   SID_MAX_DB,
   SID_SMOOTHING,
+  SID_ABOUT,
   SID_COUNT,
 } SliderId;
 
@@ -130,6 +143,7 @@ static const SliderDef SLIDERS[SID_COUNT] = {
     [SID_MIN_DB] = {"MIN DB", SK_FLOAT, -150.0f, 0.0f, NULL, 0, 0, false, NULL},
     [SID_MAX_DB] = {"MAX DB", SK_FLOAT, -150.0f, 0.0f, NULL, 0, 0, false, NULL},
     [SID_SMOOTHING] = {"SMOOTHING", SK_FLOAT, 0.0f, 0.99f, NULL, 0, 2, false, NULL},
+    [SID_ABOUT] = {"ABOUT", SK_BUTTON, 0.0f, 0.0f, NULL, 0, 0, false, NULL},
 };
 
 // ---------------------------------------------------------------------------
@@ -666,6 +680,11 @@ void controls_init(Controls *c)
   c->scrollbar_dragging = false;
   c->scrollbar_grab_y = 0.0f;
   c->scrollbar_grab_scroll = 0.0f;
+  // show_hint is set to true in main before config_load so that the
+  // persisted value isn't clobbered here; we only reset the transient
+  // interactive fields.
+  c->hint_dont_show_again = false;
+  c->about_visible = false;
 }
 
 void controls_toggle(Controls *c)
@@ -677,6 +696,99 @@ void controls_toggle(Controls *c)
   c->hovered = -1;
   c->open_dropdown = -1;
   c->scrollbar_dragging = false;
+  // Close the about panel whenever the modal closes so it doesn't
+  // re-open stale on the next toggle.
+  if (!c->visible)
+    c->about_visible = false;
+}
+
+// ---------------------------------------------------------------------------
+// Hint banner and about panel geometry helpers.
+// Defined here — before controls_handle_event and controls_render — so
+// both the event handler and the renderer share identical rects.
+// ---------------------------------------------------------------------------
+
+// Floating panel anchored to the bottom-centre of the window.
+static SDL_FRect hint_panel_rect(int win_w, int win_h)
+{
+  const float pw = 370.0f;
+  const float ph = 76.0f;
+  return (SDL_FRect){((float)win_w - pw) * 0.5f, (float)win_h - ph - 24.0f, pw, ph};
+}
+
+// × dismiss button — top-right corner of the hint panel.
+static SDL_FRect hint_dismiss_rect(int win_w, int win_h)
+{
+  SDL_FRect p = hint_panel_rect(win_w, win_h);
+  return (SDL_FRect){p.x + p.w - 30.0f, p.y + 8.0f, 22.0f, 22.0f};
+}
+
+// "Don't show again" checkbox — bottom-left of the hint panel.
+static SDL_FRect hint_checkbox_rect(int win_w, int win_h)
+{
+  SDL_FRect p = hint_panel_rect(win_w, win_h);
+  return (SDL_FRect){p.x + 14.0f, p.y + p.h - 26.0f, 14.0f, 14.0f};
+}
+
+// About panel "< BACK" button — left side of the modal title bar.
+static SDL_FRect about_back_rect(const Layout *L)
+{
+  return (SDL_FRect){(float)(L->modal_x + 14), (float)(L->modal_y + 14), 74.0f, 22.0f};
+}
+
+// Clickable GitHub URL rect in the about panel. Mirrors the y-position
+// arithmetic in render_about so hit-testing and rendering are in sync.
+static SDL_FRect about_link_rect(const Layout *L)
+{
+  int y = L->viewport_y0 + 8;
+  y += ui_text_line_height(UI_TEXT_LARGE) + 6;  // "Audio Visualizer"
+  y += ui_text_line_height(UI_TEXT_MEDIUM) * 3; // Version / Author / License
+  y += 16;                                      // gap before PRIVACY
+  y += ui_text_line_height(UI_TEXT_MEDIUM) + 4; // "PRIVACY" header
+  y += ui_text_line_height(UI_TEXT_SMALL) * 5;  // 5 privacy lines (incl. blank)
+  y += 14;                                      // gap before SOURCE CODE
+  y += ui_text_line_height(UI_TEXT_MEDIUM) + 4; // "SOURCE CODE" header
+  const int x = L->modal_x + 28;
+  const int w = ui_text_width(APP_GITHUB_URL, UI_TEXT_SMALL);
+  const int h = ui_text_line_height(UI_TEXT_SMALL);
+  return (SDL_FRect){(float)x, (float)y, (float)w, (float)h};
+}
+
+// ---------------------------------------------------------------------------
+// Third-party library links shown in the About panel.
+typedef struct
+{
+  const char *name;
+  const char *url;
+} AboutLib;
+
+static const AboutLib k_about_libs[] = {
+    {"SDL3", LIB_SDL3_URL},
+    {"FFTW3", LIB_FFTW3_URL},
+    {"miniaudio", LIB_MINIAUDIO_URL},
+    {"stb_truetype", LIB_STB_TT_URL},
+};
+#define ABOUT_LIBS_COUNT (int)(sizeof(k_about_libs) / sizeof(k_about_libs[0]))
+
+// Y coordinate where the LIBRARIES section begins (just below the source URL).
+static int about_libs_y0(const Layout *L)
+{
+  SDL_FRect src = about_link_rect(L);
+  return (int)src.y + ui_text_line_height(UI_TEXT_SMALL) + 14;
+}
+
+// Clickable rect for the URL of library at index i. Mirrors render_about.
+static SDL_FRect about_lib_url_rect(const Layout *L, int i)
+{
+  const int lh_m = ui_text_line_height(UI_TEXT_MEDIUM);
+  const int lh_s = ui_text_line_height(UI_TEXT_SMALL);
+  int y = about_libs_y0(L);
+  y += lh_m + 4;           // "LIBRARIES" header
+  y += i * (lh_s * 2 + 4); // previous entries (name + url + gap)
+  y += lh_s;               // skip the name line to reach the URL line
+  const int x = L->modal_x + 28;
+  const int w = ui_text_width(k_about_libs[i].url, UI_TEXT_SMALL);
+  return (SDL_FRect){(float)x, (float)y, (float)w, (float)lh_s};
 }
 
 bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
@@ -684,21 +796,58 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
   if (!c || !ev || !app)
     return false;
 
-  // Tab toggles the modal at any time.
+  // Tab toggles the modal at any time. Dismiss the hint when Tab is
+  // pressed — the user found the shortcut, so the nudge is no longer
+  // needed for this session.
   if (ev->type == SDL_EVENT_KEY_DOWN && ev->key.key == SDLK_TAB)
   {
+    c->show_hint = false;
     controls_toggle(c);
     return true;
+  }
+
+  // Hint banner events (only when the modal is closed).
+  if (c->show_hint && !c->visible && ev->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+      ev->button.button == SDL_BUTTON_LEFT)
+  {
+    const float mx = ev->button.x;
+    const float my = ev->button.y;
+
+    // × dismiss button.
+    SDL_FRect dismiss_r = hint_dismiss_rect(app->window_width, app->window_height);
+    if (point_in_rect(&dismiss_r, mx, my))
+    {
+      c->show_hint = false;
+      if (c->hint_dont_show_again)
+        config_save(app);
+      return true;
+    }
+
+    // "Don't show again" checkbox.
+    SDL_FRect check_r = hint_checkbox_rect(app->window_width, app->window_height);
+    if (point_in_rect(&check_r, mx, my))
+    {
+      c->hint_dont_show_again = !c->hint_dont_show_again;
+      return true;
+    }
+
+    // Clicks anywhere inside the panel are consumed (don't fall through).
+    SDL_FRect panel_r = hint_panel_rect(app->window_width, app->window_height);
+    if (point_in_rect(&panel_r, mx, my))
+      return true;
   }
 
   if (!c->visible)
     return false;
 
-  // Escape closes the modal (or an open dropdown first) while open.
+  // Escape: close the about panel first (back to settings), or close the
+  // dropdown, or close the modal.
   if (ev->type == SDL_EVENT_KEY_DOWN && ev->key.key == SDLK_ESCAPE)
   {
     if (c->open_dropdown >= 0)
       c->open_dropdown = -1;
+    else if (c->about_visible)
+      c->about_visible = false;
     else
       controls_toggle(c);
     return true;
@@ -706,6 +855,39 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
 
   Layout L;
   compute_layout(app->window_width, app->window_height, c, app, &L);
+
+  // About panel: back button, GitHub link, and modal-interior consumption.
+  if (c->about_visible)
+  {
+    if (ev->type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev->button.button == SDL_BUTTON_LEFT)
+    {
+      const float mx = ev->button.x;
+      const float my = ev->button.y;
+      SDL_FRect back = about_back_rect(&L);
+      if (point_in_rect(&back, mx, my))
+      {
+        c->about_visible = false;
+        return true;
+      }
+      SDL_FRect link = about_link_rect(&L);
+      if (point_in_rect(&link, mx, my))
+      {
+        SDL_OpenURL(APP_GITHUB_URL);
+        return true;
+      }
+      for (int i = 0; i < ABOUT_LIBS_COUNT; ++i)
+      {
+        SDL_FRect lr = about_lib_url_rect(&L, i);
+        if (point_in_rect(&lr, mx, my))
+        {
+          SDL_OpenURL(k_about_libs[i].url);
+          return true;
+        }
+      }
+      return point_in_modal(&L, mx, my);
+    }
+    return false;
+  }
 
   switch (ev->type)
   {
@@ -783,11 +965,16 @@ bool controls_handle_event(Controls *c, const SDL_Event *ev, AppState *app)
           c->open_dropdown = hit;
           break;
         case SK_BUTTON:
-          // BROWSE FILE… is the only button row today. Defer the actual
-          // SDL_ShowOpenFileDialog call to the main loop so it always
-          // runs on the main thread.
           if (hit == SID_BROWSE_FILE)
+          {
+            // Defer SDL_ShowOpenFileDialog to the main loop so it runs
+            // on the main thread.
             app->open_file_picker_request = true;
+          }
+          else if (hit == SID_ABOUT)
+          {
+            c->about_visible = true;
+          }
           break;
         case SK_LABEL:
           break;
@@ -935,7 +1122,9 @@ static void render_button(SDL_Renderer *ren, const Layout *L, int i, const AppSt
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 200);
   SDL_RenderRect(ren, &btn);
 
-  const char *text = "BROWSE...";
+  // Non-BROWSE buttons display their static label; BROWSE FILE shows the
+  // chosen filename (or the placeholder when no file has been picked yet).
+  const char *text = (i == SID_BROWSE_FILE) ? "BROWSE..." : SLIDERS[i].label;
   if (i == SID_BROWSE_FILE && app->current_file_path[0] != '\0')
     text = basename_of(app->current_file_path);
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
@@ -1015,17 +1204,191 @@ static void render_dropdown_popup(SDL_Renderer *ren, const Layout *L, int slider
   }
 }
 
+// ---------------------------------------------------------------------------
+// Hint banner renderer.
+// ---------------------------------------------------------------------------
+
+static void render_hint(const Controls *c, SDL_Renderer *ren, const AppState *app)
+{
+  const int ww = app->window_width;
+  const int wh = app->window_height;
+  SDL_FRect panel = hint_panel_rect(ww, wh);
+  SDL_FRect dismiss = hint_dismiss_rect(ww, wh);
+
+  // Checkbox rect computed inline (avoids the helper calling order issue).
+  SDL_FRect checkbox = {panel.x + 14.0f, panel.y + panel.h - 26.0f, 14.0f, 14.0f};
+
+  // Panel background + outline.
+  SDL_SetRenderDrawColor(ren, 10, 10, 10, 220);
+  SDL_RenderFillRect(ren, &panel);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 70);
+  SDL_RenderRect(ren, &panel);
+
+  // Main hint text, centred horizontally in the top portion of the panel.
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 230);
+  const char *hint_text = "PRESS TAB TO OPEN SETTINGS";
+  const int tw = ui_text_width(hint_text, UI_TEXT_MEDIUM);
+  const int tx = (int)panel.x + ((int)panel.w - tw) / 2;
+  const int ty = (int)panel.y + 12;
+  ui_text_draw(ren, hint_text, tx, ty, UI_TEXT_MEDIUM);
+
+  // × dismiss button.
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 50);
+  SDL_RenderFillRect(ren, &dismiss);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 150);
+  SDL_RenderRect(ren, &dismiss);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 230);
+  {
+    const char *x_label = "X";
+    const int xw = ui_text_width(x_label, UI_TEXT_SMALL);
+    const int xlh = ui_text_line_height(UI_TEXT_SMALL);
+    ui_text_draw(ren, x_label, (int)dismiss.x + ((int)dismiss.w - xw) / 2,
+                 (int)dismiss.y + ((int)dismiss.h - xlh) / 2, UI_TEXT_SMALL);
+  }
+
+  // "Don't show again" checkbox.
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 50);
+  SDL_RenderFillRect(ren, &checkbox);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 180);
+  SDL_RenderRect(ren, &checkbox);
+  if (c->hint_dont_show_again)
+  {
+    SDL_FRect inner = {checkbox.x + 3.0f, checkbox.y + 3.0f, checkbox.w - 6.0f, checkbox.h - 6.0f};
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+    SDL_RenderFillRect(ren, &inner);
+  }
+
+  // Checkbox label.
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 180);
+  const int clh = ui_text_line_height(UI_TEXT_SMALL);
+  ui_text_draw(ren, "DON'T SHOW AGAIN", (int)checkbox.x + (int)checkbox.w + 6,
+               (int)checkbox.y + ((int)checkbox.h - clh) / 2, UI_TEXT_SMALL);
+}
+
+// ---------------------------------------------------------------------------
+// About panel renderer. Replaces the rows region when c->about_visible.
+// Draws title, back button, and static about + privacy content.
+// ---------------------------------------------------------------------------
+
+static void render_about(SDL_Renderer *ren, const Layout *L)
+{
+  // "About" title — centred in the modal header.
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  const char *title = "About";
+  const int title_w = ui_text_width(title, L->title_size_px);
+  ui_text_draw(ren, title, L->modal_x + (L->modal_w - title_w) / 2, L->modal_y + 18,
+               L->title_size_px);
+
+  // "< BACK" button in the header left.
+  SDL_FRect back = about_back_rect(L);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 40);
+  SDL_RenderFillRect(ren, &back);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 150);
+  SDL_RenderRect(ren, &back);
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 230);
+  ui_text_draw(ren, "< BACK", (int)back.x + 8, text_y_for_rect(back.y, back.h, L->text_size_px),
+               L->text_size_px);
+
+  // Content — rendered in the rows viewport region.
+  const int x = L->modal_x + 28;
+  int y = L->viewport_y0 + 8;
+  const int lh_l = ui_text_line_height(UI_TEXT_LARGE);
+  const int lh_m = ui_text_line_height(UI_TEXT_MEDIUM);
+  const int lh_s = ui_text_line_height(UI_TEXT_SMALL);
+
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  ui_text_draw(ren, "Audio Visualizer", x, y, UI_TEXT_LARGE);
+  y += lh_l + 6;
+
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 200);
+  ui_text_draw(ren, "Version " APP_VERSION_STRING, x, y, UI_TEXT_MEDIUM);
+  y += lh_m;
+  ui_text_draw(ren, "Author: Charles Thompson", x, y, UI_TEXT_MEDIUM);
+  y += lh_m;
+  ui_text_draw(ren, "License: GNU GPL v3", x, y, UI_TEXT_MEDIUM);
+  y += lh_m + 16;
+
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  ui_text_draw(ren, "PRIVACY", x, y, UI_TEXT_MEDIUM);
+  y += lh_m + 4;
+
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 170);
+  static const char *const privacy[] = {
+      "This app collects no data, stores nothing,",
+      "and makes no network connections of any kind.",
+      "",
+      "Microphone input is processed locally in real",
+      "time and is never recorded or sent anywhere.",
+  };
+  const int n = (int)(sizeof(privacy) / sizeof(privacy[0]));
+  for (int i = 0; i < n; ++i)
+  {
+    if (privacy[i][0])
+      ui_text_draw(ren, privacy[i], x, y, UI_TEXT_SMALL);
+    y += lh_s;
+  }
+
+  // Source code link.
+  y += 14;
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  ui_text_draw(ren, "SOURCE CODE", x, y, UI_TEXT_MEDIUM);
+  y += lh_m + 4;
+
+  // Draw the URL in a distinct blue-ish tint with an underline so it reads
+  // as a hyperlink. SDL_OpenURL is called when the user clicks on it.
+  const int url_w = ui_text_width(APP_GITHUB_URL, UI_TEXT_SMALL);
+  SDL_SetRenderDrawColor(ren, 100, 180, 255, 220);
+  ui_text_draw(ren, APP_GITHUB_URL, x, y, UI_TEXT_SMALL);
+  SDL_RenderLine(ren, (float)x, (float)(y + lh_s - 2), (float)(x + url_w), (float)(y + lh_s - 2));
+  y += lh_s;
+
+  // Libraries section.
+  y += 14;
+  SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  ui_text_draw(ren, "LIBRARIES", x, y, UI_TEXT_MEDIUM);
+  y += lh_m + 4;
+
+  for (int i = 0; i < ABOUT_LIBS_COUNT; ++i)
+  {
+    // Library name in dim white.
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, 200);
+    ui_text_draw(ren, k_about_libs[i].name, x, y, UI_TEXT_SMALL);
+    y += lh_s;
+
+    // Clickable URL in blue with underline.
+    const int lw = ui_text_width(k_about_libs[i].url, UI_TEXT_SMALL);
+    SDL_SetRenderDrawColor(ren, 100, 180, 255, 220);
+    ui_text_draw(ren, k_about_libs[i].url, x, y, UI_TEXT_SMALL);
+    SDL_RenderLine(ren, (float)x, (float)(y + lh_s - 2), (float)(x + lw), (float)(y + lh_s - 2));
+    y += lh_s + 4;
+  }
+}
+
 void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
 {
-  if (!c || !ren || !app || !c->visible)
+  if (!c || !ren || !app)
     return;
-
-  Layout L;
-  compute_layout(app->window_width, app->window_height, c, app, &L);
 
   SDL_BlendMode prev_blend = SDL_BLENDMODE_NONE;
   SDL_GetRenderDrawBlendMode(ren, &prev_blend);
   SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+
+  // Hint banner — shown when the settings modal is closed.
+  if (c->show_hint && !c->visible)
+  {
+    render_hint(c, ren, app);
+    SDL_SetRenderDrawBlendMode(ren, prev_blend);
+    return;
+  }
+
+  if (!c->visible)
+  {
+    SDL_SetRenderDrawBlendMode(ren, prev_blend);
+    return;
+  }
+
+  Layout L;
+  compute_layout(app->window_width, app->window_height, c, app, &L);
 
   // Full-window black translucent overlay.
   SDL_SetRenderDrawColor(ren, 0, 0, 0, 180);
@@ -1041,7 +1404,15 @@ void controls_render(Controls *c, SDL_Renderer *ren, const AppState *app)
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 80);
   SDL_RenderRect(ren, &modal);
 
-  // Title.
+  // About panel replaces the slider rows (title + back button drawn inside).
+  if (c->about_visible)
+  {
+    render_about(ren, &L);
+    SDL_SetRenderDrawBlendMode(ren, prev_blend);
+    return;
+  }
+
+  // Settings title.
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
   const char *title = "Settings";
   const int title_w = ui_text_width(title, L.title_size_px);

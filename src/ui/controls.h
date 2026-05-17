@@ -50,6 +50,16 @@ typedef struct Controls
   bool scrollbar_dragging;
   float scrollbar_grab_y;
   float scrollbar_grab_scroll;
+
+  // First-launch hint banner ("Press Tab to open Settings"). Initialized
+  // to true in main before config_load; config persists false once the
+  // user checks "Don't show again". Dismissing with Tab or the × button
+  // hides it for the session; the checkbox makes the hide permanent.
+  bool show_hint;
+  bool hint_dont_show_again;
+
+  // When true the modal shows the About panel instead of the slider rows.
+  bool about_visible;
 } Controls;
 
 void controls_init(Controls *c);
