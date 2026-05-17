@@ -9,6 +9,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Enable link-time optimization for Release. Per-target so Debug builds
+# stay fast to iterate. check_ipo_supported() will fail clean on toolchains
+# that don't have a working linker plugin (e.g. some Linux distros).
+include(CheckIPOSupported)
+check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_DIAG LANGUAGES C)
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
 
@@ -153,23 +159,64 @@ if(APPLE)
         INSTALL_RPATH "@executable_path/../Frameworks"
     )
 
+    # Keep debug info in Release so dsymutil has something to extract.
+    # -g + -O3 is the standard Apple workflow: full optimization with
+    # symbols recoverable via the .dSYM bundle after strip.
+    target_compile_options(audiovisualizer PRIVATE
+        $<$<CONFIG:Release>:-g>
+    )
+
+    # Extract a .dSYM bundle next to the .app (Apple convention is to
+    # ship it as a sibling, not embedded in the bundle) and then, in
+    # Release only, strip local symbols from the binary. Both run on
+    # the just-linked, not-yet-relocated executable -- before
+    # bundle_macos.sh or codesign, so the final signature covers
+    # the stripped binary.
+    add_custom_command(TARGET audiovisualizer POST_BUILD
+        COMMAND dsymutil "$<TARGET_FILE:audiovisualizer>"
+                -o "$<TARGET_BUNDLE_DIR:audiovisualizer>.dSYM"
+        VERBATIM
+    )
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        add_custom_command(TARGET audiovisualizer POST_BUILD
+            COMMAND strip -x "$<TARGET_FILE:audiovisualizer>"
+            VERBATIM
+        )
+    endif()
+
     # Relocate any non-system dylib (currently just libSDL3.0.dylib --
     # FFTW3F is statically linked, miniaudio is single-header) into
     # Contents/Frameworks/ and rewrite the binary's references to
     # @rpath. Must run before codesign so the bundled copies get a
     # matching ad-hoc signature.
     add_custom_command(TARGET audiovisualizer POST_BUILD
-        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos_deps.sh"
+        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.sh"
                 "$<TARGET_BUNDLE_DIR:audiovisualizer>"
         VERBATIM
     )
 
-    # Ad-hoc sign the whole .app so TCC can match it by a stable identity.
+    # Ad-hoc sign the whole .app with App Sandbox + Hardened Runtime
+    # + the entitlements the distribution build needs (audio input,
+    # user-selected file read, library-validation off because nested
+    # ad-hoc code has no Team ID). --deep cascades the signature into
+    # Contents/Frameworks/ so the bundled SDL3 dylib is signed in the
+    # same pass. TCC matches on the stable --identifier.
     add_custom_command(TARGET audiovisualizer POST_BUILD
-        COMMAND codesign --force --deep --sign - --identifier org.audiovisualizer.app
+        COMMAND codesign --force --deep --options runtime
+                --entitlements "${CMAKE_CURRENT_SOURCE_DIR}/macos/audiovisualizer.entitlements"
+                --sign - --identifier org.audiovisualizer.app
                 "$<TARGET_BUNDLE_DIR:audiovisualizer>"
         VERBATIM
     )
+endif()
+
+# LTO for Release. Gated on toolchain support so a Linux build on a
+# distro without LLVMgold.so / lld doesn't break.
+if(IPO_SUPPORTED)
+    set_property(TARGET audiovisualizer PROPERTY
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+else()
+    message(STATUS "IPO/LTO unavailable, building without: ${IPO_DIAG}")
 endif()
 
 if(WIN32)

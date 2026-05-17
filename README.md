@@ -88,9 +88,12 @@ cmake --build build -j
 
 Build outputs:
 
-- **macOS**: `build/audiovisualizer.app` — a regular `.app` bundle with the
-  icon, `Info.plist`, and an ad-hoc code signature. Double-click it in Finder,
-  drag it to `/Applications`, or pin it to the Dock. The executable inside is
+- **macOS**: `build/audiovisualizer.app` — a self-contained `.app` bundle.
+  SDL3 is embedded in `Contents/Frameworks/`; no Homebrew installation is
+  required on the target machine. The bundle is ad-hoc signed with App
+  Sandbox, Hardened Runtime, and the audio-input entitlement — all handled
+  automatically by CMake. Double-click it in Finder, drag it to
+  `/Applications`, or pin it to the Dock. The executable inside is
   `build/audiovisualizer.app/Contents/MacOS/audiovisualizer` if you want to
   run with CLI flags.
 - **Windows**: `build/audiovisualizer.exe` — a GUI-subsystem executable (no
@@ -161,7 +164,7 @@ shell with flags.
 
 - `Tab` — toggle the settings panel (FFT size, dB range, smoothing,
   semitone range, brightness/length power, waveform toggles, etc.)
-- `Esc` — quit (or close an open dropdown / the settings panel)
+- `Esc` — close an open dropdown or the settings panel (does not quit)
 
 ## License
 

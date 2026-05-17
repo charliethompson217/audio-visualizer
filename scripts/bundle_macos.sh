@@ -9,7 +9,7 @@
 # Scope is intentionally one level deep -- if a bundled dylib ever
 # starts pulling in its own Homebrew deps, extend this to recurse.
 #
-# Usage: bundle_macos_deps.sh <path/to/Foo.app>
+# Usage: bundle_macos.sh <path/to/Foo.app>
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then

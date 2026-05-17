@@ -6,6 +6,10 @@
     <true/>
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <!-- Required under ad-hoc signing: hardened runtime + library
+         validation rejects nested ad-hoc-signed code because there is
+         no Team ID to match the main binary against. Drop this only
+         once the app ships under a Developer ID. -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
     <key>com.apple.security.files.user-selected.read-only</key>
