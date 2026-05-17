@@ -15,6 +15,8 @@ pkg_check_modules(FFTW3F REQUIRED IMPORTED_TARGET fftw3f)
 
 add_executable(audiovisualizer
     src/main.c
+    src/config.c
+    src/platform/paths.c
     src/audio/pcm_ring.c
     src/audio/audio_source.c
     src/audio/source_test_tone.c

@@ -28,6 +28,7 @@
 #include "app_state.h"
 #include "audio/audio_source.h"
 #include "audio/pcm_ring.h"
+#include "config.h"
 #include "render/pixel_buffer.h"
 #include "render/renderer.h"
 #include "ui/controls.h"
@@ -39,6 +40,10 @@
 
 typedef struct CliArgs
 {
+  // True when the user passed an explicit source flag. False CLI values
+  // must not clobber whatever config_load() restored from the previous
+  // run; only an explicit flag overrides persistence.
+  bool kind_set;
   AudioSourceKind kind;
   const char *file_path;
 } CliArgs;
@@ -60,6 +65,7 @@ static void print_usage(const char *prog)
 
 static bool parse_cli(int argc, char **argv, CliArgs *out)
 {
+  out->kind_set = false;
   out->kind = AUDIO_SOURCE_SYSTEM;
   out->file_path = NULL;
   for (int i = 1; i < argc; ++i)
@@ -68,6 +74,7 @@ static bool parse_cli(int argc, char **argv, CliArgs *out)
     if (strcmp(a, "--test-tone") == 0)
     {
       out->kind = AUDIO_SOURCE_TEST_TONE;
+      out->kind_set = true;
     }
     else if (strcmp(a, "--file") == 0)
     {
@@ -77,15 +84,18 @@ static bool parse_cli(int argc, char **argv, CliArgs *out)
         return false;
       }
       out->kind = AUDIO_SOURCE_FILE;
+      out->kind_set = true;
       out->file_path = argv[++i];
     }
     else if (strcmp(a, "--mic") == 0)
     {
       out->kind = AUDIO_SOURCE_MIC;
+      out->kind_set = true;
     }
     else if (strcmp(a, "--system") == 0)
     {
       out->kind = AUDIO_SOURCE_SYSTEM;
+      out->kind_set = true;
     }
     else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0)
     {
@@ -647,14 +657,46 @@ int main(int argc, char **argv)
 
   AppState app = {0};
   app.running = true;
+
+  // Persistable defaults. config_load() overwrites individual fields on top
+  // of these; CLI flags then override the initial source. Render dimensions
+  // and the audio-source completion fields (sample_rate/channels/ring) are
+  // derived later, once window size and audio kind are final.
   app.window_width = DEFAULT_WIDTH;
   app.window_height = DEFAULT_HEIGHT;
-  app.render_width = DEFAULT_WIDTH * RENDER_SCALE;
-  app.render_height = DEFAULT_HEIGHT * RENDER_SCALE;
   app.visualizer_config = visualizer_config_defaults();
   // Draw bars RENDER_SCALE render-pixels wide so that after the bilinear
   // 3:1 downsample each bar lands on exactly one display pixel
   app.visualizer_config.bar_width_px = RENDER_SCALE;
+  app.analyzer_config = (AnalyzerConfig){
+      .sample_rate = SAMPLE_RATE,
+      .fft_size = FFT_SIZE,
+      .min_db = DEFAULT_MIN_DB,
+      .max_db = DEFAULT_MAX_DB,
+      .smoothing = DEFAULT_SMOOTHING,
+      .window_function = WINDOW_HANN,
+  };
+  app.source_config.kind = AUDIO_SOURCE_SYSTEM;
+
+  // Layer persisted settings on top of defaults. Missing config file is a
+  // no-op — the app boots with built-in defaults on first launch.
+  config_load(&app);
+
+  // CLI flags are initial-source overrides only (see handover.md). Without
+  // an explicit flag we keep whatever config_load restored.
+  if (cli.kind_set)
+    app.source_config.kind = cli.kind;
+  if (cli.file_path)
+    snprintf(app.current_file_path, sizeof(app.current_file_path), "%s", cli.file_path);
+
+  // Restoring FILE without a remembered path would open the picker before
+  // the window is even up. Fall back to SYSTEM so the app always boots
+  // into a working source; the user can pick FILE from the GUI later.
+  if (app.source_config.kind == AUDIO_SOURCE_FILE && app.current_file_path[0] == '\0')
+    app.source_config.kind = AUDIO_SOURCE_SYSTEM;
+
+  app.render_width = app.window_width * RENDER_SCALE;
+  app.render_height = app.window_height * RENDER_SCALE;
 
   if (!pixel_buffer_init(&app.pixel_buffer, app.render_width, app.render_height))
   {
@@ -673,14 +715,6 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  app.analyzer_config = (AnalyzerConfig){
-      .sample_rate = SAMPLE_RATE,
-      .fft_size = FFT_SIZE,
-      .min_db = DEFAULT_MIN_DB,
-      .max_db = DEFAULT_MAX_DB,
-      .smoothing = DEFAULT_SMOOTHING,
-      .window_function = WINDOW_HANN,
-  };
   if (!analyzer_init(&app.analyzer, &app.analyzer_config))
   {
     fprintf(stderr, "analyzer_init failed\n");
@@ -713,29 +747,40 @@ int main(int argc, char **argv)
   if (!ui_text_init((SDL_Renderer *)app.sdl_renderer))
     fprintf(stderr, "warn: no system font found; UI text disabled\n");
 
-  // Seed the UI's "currently selected file" from --file so re-opening the
-  // picker remembers the last path, and so apply_pending_source_change can
-  // re-create the FILE source after a runtime switch away and back.
-  if (cli.file_path)
-    snprintf(app.current_file_path, sizeof(app.current_file_path), "%s", cli.file_path);
-
   // Register the SDL user event used by the file-picker callback to hand
   // the chosen path back to the main thread.
   g_file_picked_event = SDL_RegisterEvents(1);
 
-  app.source_config = (AudioSourceConfig){
-      .kind = cli.kind,
-      .file_path = cli.file_path,
-      .sample_rate = SAMPLE_RATE,
-      .channels = 1,
-      .ring = &app.ring,
-  };
+  // Finalize source config from whatever survived config_load + CLI.
+  app.source_config.file_path =
+      (app.source_config.kind == AUDIO_SOURCE_FILE) ? app.current_file_path : NULL;
+  app.source_config.sample_rate = SAMPLE_RATE;
+  app.source_config.channels = 1;
+  app.source_config.ring = &app.ring;
+
   app.source = audio_source_create(&app.source_config);
   if (!app.source || !audio_source_start(app.source))
   {
-    fprintf(stderr, "audio source failed to start\n");
-    cleanup(&app);
-    return 1;
+    // A persisted source (e.g. mic with revoked permission, file that's
+    // been deleted) shouldn't brick startup. Drop down to test tone and
+    // surface the failure in the modal once it's opened.
+    if (app.source)
+    {
+      audio_source_destroy(app.source);
+      app.source = NULL;
+    }
+    fprintf(stderr, "audio: initial source failed; falling back to test tone\n");
+    snprintf(app.ui_error_msg, sizeof(app.ui_error_msg),
+             "Saved audio source failed to start. Falling back to test tone.");
+    app.source_config.kind = AUDIO_SOURCE_TEST_TONE;
+    app.source_config.file_path = NULL;
+    app.source = audio_source_create(&app.source_config);
+    if (!app.source || !audio_source_start(app.source))
+    {
+      fprintf(stderr, "audio: test-tone fallback also failed\n");
+      cleanup(&app);
+      return 1;
+    }
   }
 
   // The system audio tap (and potentially other backends) negotiate their
@@ -794,6 +839,9 @@ int main(int argc, char **argv)
   }
 
   SDL_RemoveEventWatch(on_resize_watch, &app);
+  // Persist user-modifiable settings on graceful exit. Failures are
+  // non-fatal — the next launch will just fall back to defaults.
+  config_save(&app);
   cleanup(&app);
   return 0;
 }
