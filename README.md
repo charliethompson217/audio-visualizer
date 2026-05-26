@@ -5,11 +5,19 @@ A small native C application that visualizes real-time audio as a log-frequency
 app doesn't care whether samples come from a file, microphone, system output,
 or the bundled public-domain demo song.
 
-## macOS Download
+## Download
 
-**[Audio\_Visualizer-0.1-macOS.dmg](https://github.com/charliethompson217/audio-visualizer/releases/download/0.1/Audio_Visualizer-0.1-macOS.dmg)**
+### Mac App Store
 
-Open the `.dmg` and drag **Audio Visualizer** to your Applications folder. The app is signed and notarized with Apple's Developer ID, so macOS will open it without a security warning.
+**[Vizzy – Audio Visualizer on the Mac App Store](https://apps.apple.com/us/app/vizzy-audio-visualizer/id6770312082?mt=12)**
+
+The easiest way to install on macOS. Requires macOS 14.2 or later.
+
+### Direct Download (macOS)
+
+**[GitHub Releases](https://github.com/charliethompson217/audio-visualizer/releases)**
+
+Download the latest `.dmg`, open it, and drag **Audio Visualizer** to your Applications folder. The app is signed and notarized with Apple's Developer ID, so macOS will open it without a security warning.
 
 Requires macOS 14.2 or later.
 
